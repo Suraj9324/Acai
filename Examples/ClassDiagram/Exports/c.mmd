@@ -1,0 +1,50 @@
+classDiagram
+    class C_Genre["Genre"] {
+        <<enumeration>>
+        GENRE_POP
+        GENRE_ROCK
+        GENRE_JAZZ
+        GENRE_CLASSICAL
+        GENRE_ELECTRONIC
+        GENRE_SPOKEN_WORD
+    }
+    class C_Library["Library"] {
+        <<struct>>
+        +playlists Playlist
+        +count int
+    }
+    class C_MediaItem["MediaItem"] {
+        <<struct>>
+        +title char
+        +duration double
+        +genre Genre
+    }
+    class C_Player["Player"] {
+        <<struct>>
+        +library Library
+        +now_playing int
+    }
+    class C_Playlist["Playlist"] {
+        <<struct>>
+        +name char
+        +items MediaItem
+        +count int
+    }
+    class C_Podcast["Podcast"] {
+        <<struct>>
+        +base MediaItem
+        +host char
+        +episode_number int
+    }
+    class C_Song["Song"] {
+        <<struct>>
+        +base MediaItem
+        +artist char
+        +album char
+    }
+    C_Library *-- "1" C_Playlist : playlists
+    C_MediaItem *-- "1" C_Genre : genre
+    C_Player *-- "1" C_Library : library
+    C_Playlist *-- "1" C_MediaItem : items
+    C_Podcast *-- "1" C_MediaItem : base
+    C_Song *-- "1" C_MediaItem : base

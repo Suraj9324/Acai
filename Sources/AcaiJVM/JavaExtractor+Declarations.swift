@@ -1,0 +1,240 @@
+import AcaiCore
+import AcaiTreeSitter
+
+// MARK: - Program & Declaration Extraction
+
+extension JavaExtractor {
+
+    private enum SourceFileAction {
+        case setPackage
+        case extractType
+    }
+
+    private static let sourceFileDispatch: [String: SourceFileAction] = [
+        "package_declaration": .setPackage,
+        "class_declaration": .extractType,
+        "interface_declaration": .extractType,
+        "enum_declaration": .extractType,
+        "record_declaration": .extractType,
+        "annotation_type_declaration": .extractType
+    ]
+
+    mutating func walkSourceFile(_ node: Node) {
+        for (child, action) in NodeDispatch(Self.sourceFileDispatch).matches(in: node) {
+            switch action {
+            case .setPackage:
+                if let name = extractPackageName(child) {
+                    _ = declarations.enter(namespace: name)
+                }
+            case .extractType:
+                if let nodeType = child.nodeType, var typeDecl = extractTopLevelType(child, nodeType: nodeType) {
+                    typeDecl.documentation = documentation.documentation(above: child, in: context)
+                    declarations.types.append(typeDecl)
+                }
+            }
+        }
+    }
+
+    mutating func extractTopLevelType(_ node: Node, nodeType: String) -> TypeDeclaration? {
+        switch nodeType {
+        case "class_declaration":
+            return extractClassDeclaration(node)
+        case "interface_declaration":
+            return extractInterfaceDeclaration(node)
+        case "enum_declaration":
+            return extractEnumDeclaration(node)
+        case "record_declaration":
+            return extractRecordDeclaration(node)
+        case "annotation_type_declaration":
+            return extractAnnotationTypeDeclaration(node)
+        default:
+            return nil
+        }
+    }
+
+    // MARK: - Package
+
+    private func extractPackageName(_ node: Node) -> String? {
+        for child in node.children() {
+            guard let nodeType = child.nodeType else { continue }
+            if nodeType == "scoped_identifier" || nodeType == "identifier" {
+                return child.text(in: context)
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Qualified Name Helpers
+
+    func typeId(_ name: String) -> String { declarations.qualifiedName(name) }
+
+    // MARK: - Class Declaration
+
+    mutating func extractClassDeclaration(_ node: Node) -> TypeDeclaration? {
+        let modifierInfo = modifiers.info(fromParentOf: node)
+        guard let nameNode = node.child(byFieldName: "name") else { return nil }
+        let name = nameNode.text(in: context)
+        let qualifiedTypeName = declarations.qualifiedName(name)
+        let nodeLoc = node.location(in: context)
+
+        let genericParams = typeReferences.extractTypeParameters(from: node)
+        var inheritedTypes: [TypeReference] = []
+
+        if let superclassNode = node.child(byFieldName: "superclass") {
+            let superTypes = typeReferences.extractSuperclassTypes(superclassNode)
+            inheritedTypes.append(contentsOf: superTypes)
+            declarations.recordSupertypeRelationships(from: qualifiedTypeName, to: superTypes, kind: .inheritance)
+        }
+
+        if let interfacesNode = node.child(byFieldName: "interfaces") {
+            let ifaceTypes = typeReferences.extractTypeList(interfacesNode)
+            inheritedTypes.append(contentsOf: ifaceTypes)
+            declarations.recordSupertypeRelationships(from: qualifiedTypeName, to: ifaceTypes, kind: .conformance)
+        }
+
+        var bodyContext = BodyExtractionContext(parentQualifiedName: qualifiedTypeName)
+
+        if let bodyNode = node.child(byFieldName: "body") {
+            extractClassBody(bodyNode, context: &bodyContext)
+        }
+
+        return TypeDeclaration(
+            id: typeId(name), name: name, qualifiedName: qualifiedTypeName, kind: .class,
+            accessLevel: modifierInfo.accessLevel, modifiers: modifierInfo.modifiers,
+            genericParameters: genericParams, inheritedTypes: inheritedTypes,
+            members: bodyContext.members, enumCases: bodyContext.enumCases,
+            nestedTypes: bodyContext.nestedTypes,
+            annotations: modifierInfo.annotations, namespace: declarations.currentNamespace, location: nodeLoc
+        )
+    }
+
+    // MARK: - Interface Declaration
+
+    mutating func extractInterfaceDeclaration(_ node: Node) -> TypeDeclaration? {
+        let modifierInfo = modifiers.info(fromParentOf: node)
+        guard let nameNode = node.child(byFieldName: "name") else { return nil }
+        let name = nameNode.text(in: context)
+        let qualifiedTypeName = declarations.qualifiedName(name)
+        let nodeLoc = node.location(in: context)
+
+        let genericParams = typeReferences.extractTypeParameters(from: node)
+        var inheritedTypes: [TypeReference] = []
+
+        for child in node.children() {
+            guard child.nodeType == "extends_interfaces" else { continue }
+            let extTypes = typeReferences.extractTypeList(child)
+            inheritedTypes.append(contentsOf: extTypes)
+            declarations.recordSupertypeRelationships(from: qualifiedTypeName, to: extTypes, kind: .conformance)
+        }
+
+        var bodyContext = BodyExtractionContext(parentQualifiedName: qualifiedTypeName)
+
+        if let bodyNode = node.child(byFieldName: "body") {
+            extractInterfaceBody(bodyNode, context: &bodyContext)
+        }
+
+        return TypeDeclaration(
+            id: typeId(name), name: name, qualifiedName: qualifiedTypeName, kind: .interface,
+            accessLevel: modifierInfo.accessLevel, modifiers: modifierInfo.modifiers,
+            genericParameters: genericParams, inheritedTypes: inheritedTypes,
+            members: bodyContext.members, enumCases: bodyContext.enumCases,
+            nestedTypes: bodyContext.nestedTypes,
+            annotations: modifierInfo.annotations, namespace: declarations.currentNamespace, location: nodeLoc
+        )
+    }
+
+    // MARK: - Enum Declaration
+
+    mutating func extractEnumDeclaration(_ node: Node) -> TypeDeclaration? {
+        let modifierInfo = modifiers.info(fromParentOf: node)
+        guard let nameNode = node.child(byFieldName: "name") else { return nil }
+        let name = nameNode.text(in: context)
+        let qualifiedTypeName = declarations.qualifiedName(name)
+        let nodeLoc = node.location(in: context)
+
+        var inheritedTypes: [TypeReference] = []
+        if let interfacesNode = node.child(byFieldName: "interfaces") {
+            let ifaceTypes = typeReferences.extractTypeList(interfacesNode)
+            inheritedTypes.append(contentsOf: ifaceTypes)
+            declarations.recordSupertypeRelationships(from: qualifiedTypeName, to: ifaceTypes, kind: .conformance)
+        }
+
+        var bodyContext = BodyExtractionContext(parentQualifiedName: qualifiedTypeName)
+
+        if let bodyNode = node.child(byFieldName: "body") {
+            extractEnumBody(bodyNode, context: &bodyContext)
+        }
+
+        return TypeDeclaration(
+            id: typeId(name), name: name, qualifiedName: qualifiedTypeName, kind: .enum,
+            accessLevel: modifierInfo.accessLevel, modifiers: modifierInfo.modifiers,
+            inheritedTypes: inheritedTypes, members: bodyContext.members,
+            enumCases: bodyContext.enumCases, nestedTypes: bodyContext.nestedTypes,
+            annotations: modifierInfo.annotations, namespace: declarations.currentNamespace, location: nodeLoc
+        )
+    }
+
+    // MARK: - Record Declaration
+
+    mutating func extractRecordDeclaration(_ node: Node) -> TypeDeclaration? {
+        let modifierInfo = modifiers.info(fromParentOf: node)
+        guard let nameNode = node.child(byFieldName: "name") else { return nil }
+        let name = nameNode.text(in: context)
+        let qualifiedTypeName = declarations.qualifiedName(name)
+        let nodeLoc = node.location(in: context)
+
+        let genericParams = typeReferences.extractTypeParameters(from: node)
+        var inheritedTypes: [TypeReference] = []
+        if let interfacesNode = node.child(byFieldName: "interfaces") {
+            let ifaceTypes = typeReferences.extractTypeList(interfacesNode)
+            inheritedTypes.append(contentsOf: ifaceTypes)
+            declarations.recordSupertypeRelationships(from: qualifiedTypeName, to: ifaceTypes, kind: .conformance)
+        }
+
+        var bodyContext = BodyExtractionContext(parentQualifiedName: qualifiedTypeName)
+        if let paramsNode = node.child(byFieldName: "parameters") {
+            for component in parameterExtractor.recordComponents(paramsNode) {
+                bodyContext.members.append(Member(
+                    name: component.internalName, kind: .property,
+                    accessLevel: .public, type: component.type, location: nodeLoc
+                ))
+            }
+        }
+
+        if let bodyNode = node.child(byFieldName: "body") {
+            extractClassBody(bodyNode, context: &bodyContext)
+        }
+
+        return TypeDeclaration(
+            id: typeId(name), name: name, qualifiedName: qualifiedTypeName, kind: .record,
+            accessLevel: modifierInfo.accessLevel, modifiers: modifierInfo.modifiers,
+            genericParameters: genericParams, inheritedTypes: inheritedTypes,
+            members: bodyContext.members, enumCases: bodyContext.enumCases,
+            nestedTypes: bodyContext.nestedTypes,
+            annotations: modifierInfo.annotations, namespace: declarations.currentNamespace, location: nodeLoc
+        )
+    }
+
+    // MARK: - Annotation Type Declaration
+
+    mutating func extractAnnotationTypeDeclaration(_ node: Node) -> TypeDeclaration? {
+        let modifierInfo = modifiers.info(fromParentOf: node)
+        guard let nameNode = node.child(byFieldName: "name") else { return nil }
+        let name = nameNode.text(in: context)
+        let qualifiedTypeName = declarations.qualifiedName(name)
+        let nodeLoc = node.location(in: context)
+
+        var bodyContext = BodyExtractionContext(parentQualifiedName: qualifiedTypeName)
+
+        if let bodyNode = node.child(byFieldName: "body") {
+            extractAnnotationTypeBody(bodyNode, context: &bodyContext)
+        }
+
+        return TypeDeclaration(
+            id: typeId(name), name: name, qualifiedName: qualifiedTypeName, kind: .annotation,
+            accessLevel: modifierInfo.accessLevel, modifiers: modifierInfo.modifiers,
+            members: bodyContext.members, nestedTypes: bodyContext.nestedTypes,
+            annotations: modifierInfo.annotations, namespace: declarations.currentNamespace, location: nodeLoc
+        )
+    }
+}

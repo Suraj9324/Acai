@@ -1,0 +1,72 @@
+import ArgumentParser
+import Foundation
+import AcaiLibrary
+
+extension AcaiCommand {
+    struct List: ParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "List all stored analyses"
+        )
+
+        mutating func run() throws {
+            let storageDir = AcaiConstants.standard.analysisDirectory
+            let fileManager = FileManager.default
+
+            guard fileManager.fileExists(atPath: storageDir.path) else {
+                print("No stored analyses found.")
+                return
+            }
+
+            let contents = try fileManager.contentsOfDirectory(
+                at: storageDir,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            )
+
+            let jsonFiles = contents.filter { $0.pathExtension == "json" }
+
+            if jsonFiles.isEmpty {
+                print("No stored analyses found.")
+                return
+            }
+
+            print(Row(name: "NAME", language: "LANGUAGE", types: "TYPES", files: "FILES", path: "PATH").formatted)
+            print(String(repeating: "-", count: 70))
+
+            let store = AnalysisStore.standard
+            for file in jsonFiles.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+                let name = file.deletingPathExtension().lastPathComponent
+                switch store.lookup(named: name) {
+                case .entry(let entry):
+                    print(Row(
+                        name: name,
+                        language: entry.artifact.metadata.sourceLanguage.rawValue,
+                        types: String(entry.artifact.types.count),
+                        files: String(entry.artifact.metadata.filePaths.count),
+                        path: entry.sourcePath
+                    ).formatted)
+                case .absent:
+                    print(Row(name: name, language: "(error reading)", types: "", files: "", path: "").formatted)
+                }
+            }
+        }
+
+        /// One line of the `acai list` table. Columns are space-padded to fixed widths;
+        /// Swift `String`s can't go through C `%s`, so the table is assembled manually.
+        private struct Row {
+            var name: String
+            var language: String
+            var types: String
+            var files: String
+            var path: String
+
+            var formatted: String {
+                name.paddedTrailing(to: 20) + "  "
+                    + language.paddedTrailing(to: 12) + "  "
+                    + types.paddedLeading(to: 6) + "  "
+                    + files.paddedLeading(to: 5) + "  "
+                    + path
+            }
+        }
+    }
+}

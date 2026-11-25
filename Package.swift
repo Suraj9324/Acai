@@ -1,0 +1,454 @@
+// swift-tools-version: 6.0
+
+import PackageDescription
+
+var optionalProducts: [Product] = []
+var optionalTargets: [Target] = []
+// Extra dependencies added to AcaiCLI only on SwiftUI-capable hosts (macOS), where the
+// SwiftUI-based image renderer (`AcaiRender`) exists. Kept empty on Linux so the CLI builds.
+var cliOptionalDependencies: [Target.Dependency] = []
+// Same, for AcaiMCP: the `acai_image` tool links `AcaiRender` on macOS; empty on Linux.
+var mcpOptionalDependencies: [Target.Dependency] = []
+
+#if canImport(SwiftUI)
+// MARK: SwiftUI rendering library, shared by the app and the CLI image command.
+optionalProducts.append(
+    .library(name: "AcaiRender", targets: ["AcaiRender"])
+)
+optionalTargets.append(
+    .target(
+        name: "AcaiRender",
+        dependencies: [
+            "AcaiCore",
+            "AcaiDiagram",
+            "AcaiDiff",
+            // For `GraphView`/`Selector` — the class-diagram Filter section reuses the quality
+            // engine's selector vocabulary instead of a second, diagram-specific one.
+            "AcaiQuality",
+        ]
+    )
+)
+
+// MARK: PNG golden-comparison math, shared by the render-snapshot tests in AcaiRenderTests and
+// AcaiAppTests. A pure leaf target — no swift-testing dependency (would need a license/privacy
+// pass for no real benefit) and no AcaiCore/AcaiLibrary dependency.
+optionalTargets.append(
+    .target(name: "AcaiPNGComparison", dependencies: [])
+)
+
+optionalTargets.append(
+    .testTarget(
+        name: "AcaiRenderTests",
+        dependencies: [
+            "AcaiRender", "AcaiCore", "AcaiLibrary", "AcaiDiagram", "AcaiQuality", "AcaiPNGComparison",
+            "AcaiArtifactGenerator"
+        ])
+)
+cliOptionalDependencies.append(.target(name: "AcaiRender", condition: .when(platforms: [.macOS])))
+mcpOptionalDependencies.append(.target(name: "AcaiRender", condition: .when(platforms: [.macOS])))
+
+// MARK: Real git engine (libgit2 via SwiftGitX), `AcaiApp`-only — pure git, no code analysis.
+// Only `AcaiApp` needs this, so it's scoped here like `AcaiRender`, keeping `AcaiCLI`/`AcaiMCP`'s
+// Linux builds (and the cost of compiling libgit2 from source) out of every target that doesn't
+// need it.
+optionalTargets.append(
+    .target(
+        name: "AcaiGit",
+        dependencies: [
+            .product(name: "SwiftGitX", package: "SwiftGitX"),
+            .product(name: "libgit2", package: "libgit2"),
+        ]
+    )
+)
+optionalTargets.append(
+    .testTarget(
+        name: "AcaiGitTests",
+        dependencies: [
+            "AcaiGit",
+            "AcaiTestSupport",
+            .product(name: "SwiftGitX", package: "SwiftGitX"),
+            .product(name: "libgit2", package: "libgit2"),
+        ]
+    )
+)
+// `hotspots`/`acai_hotspots` weigh complexity by churn, which is a history walk: the same macOS-only
+// linkage `AcaiRender` gets above, for the same reason — SwiftGitX's libgit2 builds against
+// SecureTransport/CommonCrypto, so it exists on Apple platforms only.
+cliOptionalDependencies.append(.target(name: "AcaiGit", condition: .when(platforms: [.macOS])))
+mcpOptionalDependencies.append(.target(name: "AcaiGit", condition: .when(platforms: [.macOS])))
+
+// MARK: The codebase-state widget; only `AcaiAppModel`, so the extension links as little as it can.
+optionalProducts.append(
+    .library(name: "AcaiWidget", targets: ["AcaiWidget"])
+)
+optionalTargets.append(
+    .target(
+        name: "AcaiWidget",
+        dependencies: ["AcaiAppModel"],
+        resources: [.process("Resources/Localizable.xcstrings")]
+    )
+)
+optionalTargets.append(
+    .testTarget(
+        name: "AcaiWidgetTests",
+        dependencies: ["AcaiWidget", "AcaiAppModel", "AcaiPNGComparison"],
+        // Render snapshot goldens and captures, read and written by file path.
+        exclude: ["__Snapshots__", "__RecordedSnapshots__"]
+    )
+)
+
+// A library (not an executable): the real app entry points live in the XcodeGen-generated
+// project under `App/`, one per platform, each owning its own Info.plist/entitlements/asset
+// catalog and just instantiating `ProjectBrowserView` from this library. See `App/project.yml`.
+optionalProducts.append(
+    .library(name: "AcaiApp", targets: ["AcaiApp"])
+)
+optionalTargets.append(
+    .target(
+        name: "AcaiApp",
+        dependencies: [
+            "AcaiCore",
+            "AcaiDiagram",
+            "AcaiDiff",
+            "AcaiQuality",
+            "AcaiLibrary",
+            "AcaiRender",
+            "AcaiGit",
+            "AcaiAppModel",
+            .product(name: "Yams", package: "Yams"),
+        ],
+        // `.copy`, not `.process`: `Licenses.json` is data to decode, not an asset to transform.
+        resources: [.copy("Resources/Licenses.json"), .process("Resources/Localizable.xcstrings")]
+    )
+)
+optionalTargets.append(
+    .testTarget(
+        name: "AcaiAppTests",
+        // AcaiRender/AcaiDiagram: the render snapshot tests (`ViewSnapshot.swift`) render real
+        // `AcaiApp` views via `AcaiRender`'s `DiagramImageRenderer` and construct
+        // `ClassDiagramConfiguration` fixtures directly.
+        dependencies: [
+            "AcaiApp", "AcaiCore", "AcaiRender", "AcaiDiagram", "AcaiPNGComparison", "AcaiTestSupport",
+            "AcaiArtifactGenerator",
+        ],
+        // The render snapshot tests' committed goldens (read by file path, not `Bundle.module` — see
+        // `ViewSnapshot.swift`); declared so SwiftPM doesn't warn about unhandled non-Swift files.
+        resources: [.copy("__Snapshots__")]
+    )
+)
+#endif
+
+// Hoisted out of the `Package(...)` literal below: concatenating there leaves that one expression
+// too large for the manifest to type-check in reasonable time.
+let mcpTestDependencies: [Target.Dependency] =
+    ["AcaiMCP", "AcaiLibrary", "AcaiCore"] + mcpOptionalDependencies
+
+let package = Package(
+    name: "Acai",
+    defaultLocalization: "en",
+    platforms: [
+        .macOS(.v15),
+        // v17, not v16: `AcaiApp` uses `.inspector()` (iOS 17+/macOS 13+, the latter already
+        // satisfied by the v15 floor above) for its canvas/sidebar layout. The actual shipped iOS
+        // app targets a much newer OS (see `App/project.yml`) — this is just the floor the SPM
+        // package as a whole promises to support, kept as low as the APIs in use allow so
+        // `AcaiCLI`/`AcaiMCP`'s wider compatibility isn't affected by the app's own requirements.
+        .iOS(.v17),
+        .tvOS(.v16),
+        .watchOS(.v9),
+        .visionOS(.v1),
+    ],
+    products: [
+        .library(name: "AcaiCore", targets: ["AcaiCore"]),
+        .library(name: "AcaiTreeSitter", targets: ["AcaiTreeSitter"]),
+        .library(name: "AcaiSwift", targets: ["AcaiSwift"]),
+        .library(name: "AcaiJVM", targets: ["AcaiJVM"]),
+        .library(name: "AcaiJS", targets: ["AcaiJS"]),
+        .library(name: "AcaiDart", targets: ["AcaiDart"]),
+        .library(name: "AcaiPython", targets: ["AcaiPython"]),
+        .library(name: "AcaiCFamily", targets: ["AcaiCFamily"]),
+        .library(name: "AcaiDiagram", targets: ["AcaiDiagram"]),
+        .library(name: "AcaiDiff", targets: ["AcaiDiff"]),
+        .library(name: "AcaiQuality", targets: ["AcaiQuality"]),
+        .library(name: "AcaiLibrary", targets: ["AcaiLibrary"]),
+        .library(name: "AcaiAppModel", targets: ["AcaiAppModel"]),
+        .executable(name: "AcaiMCP", targets: ["AcaiMCP"]),
+    ] + optionalProducts,
+    dependencies: [
+        .package(url: "https://github.com/swiftlang/swift-syntax.git", from: "604.0.0"),
+        .package(url: "https://github.com/tree-sitter/swift-tree-sitter", from: "0.9.0"),
+        .package(url: "https://github.com/fwcd/tree-sitter-kotlin", from: "0.3.0"),
+        .package(url: "https://github.com/tree-sitter/tree-sitter-typescript", from: "0.21.0"),
+        .package(url: "https://github.com/tree-sitter/tree-sitter-java", from: "0.21.0"),
+        // Pinned to a revision: the grammar publishes no tags.
+        .package(
+            url: "https://github.com/UserNobody14/tree-sitter-dart",
+            revision: "a9bdfa3db2fbc9b9f12c93450d04a671f33a5102"
+        ),
+        // Pinned exactly: the grammar's `scanner.c` (vendored in the `CPythonScanner` target to
+        // work around the grammar's broken SwiftPM manifest, which never compiles `scanner.c`) is
+        // coupled to this version's `parser.c` external-token table and must match it exactly.
+        .package(url: "https://github.com/tree-sitter/tree-sitter-python", exact: "0.25.0"),
+        // C and C++ share the `AcaiCFamily` target (like Java+Kotlin share `AcaiJVM`). Both grammars
+        // ship working SwiftPM manifests — tree-sitter-cpp compiles its own `src/scanner.c`, so
+        // (unlike Python) no vendored scanner target is needed.
+        .package(url: "https://github.com/tree-sitter/tree-sitter-c", from: "0.24.0"),
+        .package(url: "https://github.com/tree-sitter/tree-sitter-cpp", from: "0.23.0"),
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.3.0"),
+        .package(url: "https://github.com/jpsim/Yams", from: "6.2.2"),
+        .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.4.0"),
+        // The official Swift MCP SDK — the JSON-RPC/stdio transport behind the `AcaiMCP` entry point.
+        .package(url: "https://github.com/modelcontextprotocol/swift-sdk", from: "0.12.1"),
+        // A real git engine (libgit2) for `AcaiGit` — clone/fetch/checkout/diff, replacing GitHub
+        // zipball downloads and shelling out to `/usr/bin/git`. Not `SwiftGit2` (no working SPM+iOS
+        // story: SPM support is an unmerged PR there, and forks that add it break on iOS because
+        // newer libgit2 needs `libpcre`, which the iOS SDK doesn't ship). SwiftGitX's own libgit2
+        // dependency vendors PCRE/zlib from source and uses SecureTransport/CommonCrypto instead of
+        // OpenSSL/mbedTLS, so it builds cleanly on both macOS and iOS with nothing to fetch/link.
+        .package(url: "https://github.com/ibrahimcetin/SwiftGitX.git", from: "0.4.0"),
+        // `libgit2` itself: already a *transitive* dependency of `SwiftGitX` (which vendors it from
+        // source), but `AcaiGit`'s worktree support calls `git_worktree_*` directly — SwiftGitX
+        // has no worktree API of its own (confirmed: `SwiftGitXError.worktree` exists only as an
+        // error-code case, nothing calls the C functions) — so this needs to be a direct dependency
+        // too, not just inherited. Pinned `exact` to match SwiftGitX 0.4.0's own pin so both resolve
+        // to the same build of the C library.
+        .package(url: "https://github.com/ibrahimcetin/libgit2.git", exact: "1.9.2"),
+    ],
+    targets: [
+        // MARK: Core models
+        .target(
+            name: "AcaiCore",
+            dependencies: []
+        ),
+
+        // MARK: Shared tree-sitter helpers (re-exports SwiftTreeSitter)
+        .target(
+            name: "AcaiTreeSitter",
+            dependencies: [
+                "AcaiCore",
+                .product(name: "SwiftTreeSitter", package: "swift-tree-sitter"),
+            ]
+        ),
+
+        // MARK: Language parsers
+        .target(
+            name: "AcaiSwift",
+            dependencies: [
+                "AcaiCore",
+                .product(name: "SwiftSyntax", package: "swift-syntax"),
+                .product(name: "SwiftParser", package: "swift-syntax"),
+                .product(name: "SwiftDiagnostics", package: "swift-syntax"),
+                .product(name: "SwiftParserDiagnostics", package: "swift-syntax"),
+            ]
+        ),
+        .target(
+            name: "AcaiJS",
+            dependencies: [
+                "AcaiCore",
+                "AcaiTreeSitter",
+                .product(name: "TreeSitterTypeScript", package: "tree-sitter-typescript"),
+            ]
+        ),
+        // MARK: JVM languages (Java + Kotlin) — one target because they share the JVM build
+        // systems and the `JVMBuildSystemDetector`.
+        .target(
+            name: "AcaiJVM",
+            dependencies: [
+                "AcaiCore",
+                "AcaiTreeSitter",
+                .product(name: "TreeSitterJava", package: "tree-sitter-java"),
+                .product(name: "TreeSitterKotlin", package: "tree-sitter-kotlin"),
+            ]
+        ),
+        .target(
+            name: "AcaiDart",
+            dependencies: [
+                "AcaiCore",
+                "AcaiTreeSitter",
+                .product(name: "TreeSitterDart", package: "tree-sitter-dart"),
+            ]
+        ),
+        // Vendors *only* the grammar's `scanner.c` (+ its three small headers) so the external
+        // scanner symbols that `parser.c` references are linked. The upstream grammar's SwiftPM
+        // manifest never compiles `scanner.c` (its relative `fileExists` check fails for a remote
+        // dependency — see tree-sitter/tree-sitter-python#330, still unmerged). Drop this target and
+        // depend on the official package directly once that fix ships in a release.
+        .target(name: "CPythonScanner", exclude: ["LICENSE"]),
+        .target(
+            name: "AcaiPython",
+            dependencies: [
+                "AcaiCore",
+                "AcaiTreeSitter",
+                "CPythonScanner",
+                .product(name: "TreeSitterPython", package: "tree-sitter-python"),
+            ]
+        ),
+        // MARK: C-family languages (C + C++) — one target because they share the C/C++ build
+        // systems (CMake/Make/Meson) + `CFamilyBuildSystemDetector` and most of their tree-sitter
+        // grammar (tree-sitter-cpp reuses tree-sitter-c's node types).
+        .target(
+            name: "AcaiCFamily",
+            dependencies: [
+                "AcaiCore",
+                "AcaiTreeSitter",
+                .product(name: "TreeSitterC", package: "tree-sitter-c"),
+                .product(name: "TreeSitterCPP", package: "tree-sitter-cpp"),
+            ]
+        ),
+
+        // MARK: DOT/Graphviz diagram generator
+        // Depends on AcaiQuality for `Selector` (diagram-filter configuration, e.g.
+        // `SequenceDiagramConfiguration.filter`) — still agnostic: `Selector` names no language.
+        .target(
+            name: "AcaiDiagram",
+            dependencies: ["AcaiCore", "AcaiQuality"]
+        ),
+
+        // MARK: Semantic architecture diffing — agnostic graph/metric comparison of two artifacts,
+        // plus per-diagram-model (sequence/state/package/call-graph) deltas (depends on AcaiDiagram
+        // for those models; still names no language).
+        .target(
+            name: "AcaiDiff",
+            dependencies: ["AcaiCore", "AcaiDiagram"]
+        ),
+
+        // MARK: Architecture conformance / fitness functions — agnostic rule evaluation.
+        .target(
+            name: "AcaiQuality",
+            dependencies: ["AcaiCore"]
+        ),
+
+        // MARK: Composition root — the only target that names the built-in languages. Wires the
+        // parsers + their detectors into `AnalysisService.standard` and re-exports the agnostic API.
+        .target(
+            name: "AcaiLibrary",
+            dependencies: [
+                "AcaiCore",
+                "AcaiDiagram",
+                "AcaiDiff",
+                "AcaiQuality",
+                "AcaiSwift",
+                "AcaiJS",
+                "AcaiJVM",
+                "AcaiDart",
+                "AcaiPython",
+                "AcaiCFamily",
+            ]
+        ),
+
+        // MARK: CLI tool
+        .executableTarget(
+            name: "AcaiCLI",
+            dependencies: [
+                "AcaiCore",
+                "AcaiDiagram",
+                "AcaiDiff",
+                "AcaiQuality",
+                "AcaiLibrary",
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "Yams", package: "Yams"),
+            ] + cliOptionalDependencies,
+        ),
+
+        // MARK: MCP server
+        // A third entry point over `AcaiLibrary` (like the CLI and the app): an in-process MCP server
+        // exposing the read-only analysis engine as tools over JSON-RPC/stdio. The tool set is
+        // deliberately cross-platform (no rendering), so this target builds on Linux too.
+        .executableTarget(
+            name: "AcaiMCP",
+            dependencies: [
+                "AcaiCore",
+                "AcaiDiagram",
+                "AcaiQuality",
+                "AcaiLibrary",
+                .product(name: "MCP", package: "swift-sdk"),
+                .product(name: "Yams", package: "Yams"),
+            ] + mcpOptionalDependencies
+        ),
+
+        // MARK: The app's UI-free models — state and rules the app's views render, with no SwiftUI,
+        // AppKit, UIKit or AcaiGit dependency, so they build and are tested on Linux too.
+        .target(
+            name: "AcaiAppModel",
+            dependencies: ["AcaiCore", "AcaiDiagram", "AcaiDiff", "AcaiQuality"]
+        ),
+
+        // MARK: Tests
+        // Async waiting primitives shared by every test target that drives concurrent code. A pure
+        // leaf — no swift-testing/XCTest dependency, so it stays usable from both.
+        .target(name: "AcaiTestSupport", dependencies: []),
+        // MARK: Seeded generator of random-but-valid `CodeArtifact`s, for the property-based
+        // invariant tests. Its own target rather than part of `AcaiTestSupport`, which is a pure leaf
+        // with no `AcaiCore` dependency. Used only by test targets.
+        .target(name: "AcaiArtifactGenerator", dependencies: ["AcaiCore"]),
+        .testTarget(name: "AcaiCoreTests", dependencies: ["AcaiCore", "AcaiTestSupport"]),
+        // Java's grammar alone exercises every shared seam, so no plugin is needed.
+        .testTarget(
+            name: "AcaiTreeSitterTests",
+            dependencies: [
+                "AcaiTreeSitter",
+                "AcaiCore",
+                .product(name: "TreeSitterJava", package: "tree-sitter-java"),
+            ]
+        ),
+        .testTarget(name: "AcaiSwiftTests", dependencies: ["AcaiSwift", "AcaiCore"]),
+        .testTarget(name: "AcaiJSTests", dependencies: ["AcaiJS", "AcaiCore"]),
+        .testTarget(name: "AcaiJVMTests", dependencies: ["AcaiJVM", "AcaiCore"]),
+        .testTarget(name: "AcaiDartTests", dependencies: ["AcaiDart", "AcaiCore"]),
+        .testTarget(name: "AcaiPythonTests", dependencies: ["AcaiPython", "AcaiCore"]),
+        .testTarget(
+            name: "AcaiCFamilyTests",
+            dependencies: [
+                "AcaiCFamily",
+                "AcaiCore",
+                "AcaiTreeSitter",
+                .product(name: "TreeSitterC", package: "tree-sitter-c"),
+            ]
+        ),
+        .testTarget(
+            name: "AcaiDiagramTests",
+            dependencies: ["AcaiDiagram", "AcaiCore", "AcaiQuality", "AcaiArtifactGenerator"]),
+        .testTarget(
+            name: "AcaiDiffTests",
+            dependencies: ["AcaiDiff", "AcaiCore", "AcaiDiagram", "AcaiArtifactGenerator"]),
+        .testTarget(name: "AcaiQualityTests", dependencies: ["AcaiQuality", "AcaiCore"]),
+        // `exclude`, not `resources`: the fixtures are `.swift` files SwiftPM would otherwise compile
+        // into this target instead of leaving as parser input (read by `#filePath`).
+        .testTarget(
+            name: "AcaiLibraryTests",
+            dependencies: ["AcaiLibrary", "AcaiDiagram", "AcaiArtifactGenerator"],
+            exclude: ["Fixtures"]
+        ),
+        // `AcaiMCP` is here for `LanguageSurfaceParityTests`, which compares the CLI and MCP language lists.
+        .testTarget(name: "AcaiCLITests", dependencies: ["AcaiCLI", "AcaiCore", "AcaiLibrary", "AcaiMCP"]),
+        .testTarget(name: "AcaiMCPTests", dependencies: mcpTestDependencies),
+        .testTarget(
+            name: "AcaiAppModelTests",
+            dependencies: ["AcaiAppModel", "AcaiCore", "AcaiDiagram", "AcaiTestSupport"]
+        ),
+
+        // MARK: Characterization goldens pinning every parser's whole encoded `CodeArtifact`.
+        // `exclude`, not `resources`: the tests read both directories by path (via `#filePath`, like
+        // `AcaiExamplesTests`), and the fixtures include `.swift`/`.c`/`.cpp` files that SwiftPM
+        // would otherwise compile into this target instead of leaving as parser input.
+        .testTarget(
+            name: "AcaiParserGoldenTests",
+            dependencies: ["AcaiLibrary", "AcaiCore"],
+            exclude: ["Fixtures", "__Goldens__"]
+        ),
+
+        // MARK: The cross-language feature matrix: one hand-written expected shape per canonical
+        // language feature, one idiomatic snippet (or a waiver) per language.
+        // `exclude`, not `resources`: the snippets are read by path (via `#filePath`) and include
+        // `.swift`/`.c`/`.cpp` files SwiftPM would otherwise compile into this target.
+        .testTarget(
+            name: "AcaiContractTests",
+            dependencies: ["AcaiLibrary", "AcaiCore"],
+            exclude: ["Features"]
+        ),
+
+        // MARK: Golden-file regression tests for the checked-in Examples/ exports.
+        // Cross-platform (no AcaiRender dependency); the PNG checks live in AcaiRenderTests.
+        .testTarget(name: "AcaiExamplesTests", dependencies: ["AcaiLibrary", "AcaiDiagram", "AcaiDiff", "AcaiCore"])
+    ] + optionalTargets
+)

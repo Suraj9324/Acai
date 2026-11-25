@@ -1,0 +1,135 @@
+/// LCOM4-style lack-of-cohesion for a type: the number of connected components among the members that
+/// carry its instance behaviour, where two are connected when they touch a common stored property or
+/// one calls the other. A result of `1` means the type is cohesive (one responsibility); higher counts
+/// mark a type doing several unrelated jobs.
+///
+/// Two members are linked when they share access to a stored property by **read or write**
+/// (``Member/fieldReads`` and ``Member/assignments``) or when one self-dispatches a call to the other.
+public struct LcomAnalysis {
+    let type: TypeDeclaration
+
+    public init(type: TypeDeclaration) {
+        self.type = type
+    }
+
+    /// Number of connected components among the type's behaviour members (0 for none, 1 when cohesive).
+    var componentCount: Int {
+        let members = cohesionMembers
+        guard members.count > 1 else { return members.count }
+        return partition(of: members).componentCount
+    }
+
+    /// Instance behaviour only; initialisers are left out because populating every field would link everything.
+    private var cohesionMembers: [Member] {
+        type.members.filter { member in
+            guard !member.modifiers.contains(.static), !member.modifiers.contains(.class) else { return false }
+            switch member.kind {
+            case .method, .subscript:
+                return true
+            case .property:
+                return member.isComputed
+            case .initializer, .deinitializer:
+                return false
+            }
+        }
+    }
+
+    /// The member-name clusters the type splits into — the *shape* of its lack of cohesion, turning the
+    /// `lackOfCohesion` count into an actionable extract-class proposal ("these methods belong together;
+    /// those form a separate responsibility"). One inner array per connected component; a cohesive type
+    /// yields a single cluster. Member names within each cluster and the clusters themselves are sorted
+    /// for stable output.
+    public var components: [[String]] {
+        let members = cohesionMembers
+        guard members.count > 1 else { return members.isEmpty ? [] : [[members[0].name]] }
+        var partition = partition(of: members)
+        return partition.groups()
+            .map { indices in indices.map { members[$0].name }.sorted() }
+            .sorted { ($0.first ?? "") < ($1.first ?? "") }
+    }
+
+    /// The disjoint-set over member indices, linked by shared field access and mutual self-calls.
+    private func partition(of members: [Member]) -> DisjointSet {
+        var components = DisjointSet(count: members.count)
+        linkBySharedField(members, into: &components)
+        linkByMutualCall(members, into: &components)
+        return components
+    }
+
+    /// Union members that access a common stored property — by read or write, same field name and a
+    /// `self`/bare receiver.
+    private func linkBySharedField(_ methods: [Member], into components: inout DisjointSet) {
+        let properties = Set(type.members.filter(\.isStoredProperty).map(\.name))
+        var accessorsByField: [String: [Int]] = [:]
+        for (index, method) in methods.enumerated() {
+            for assignment in method.assignments
+            where assignment.targetReceiver == nil && properties.contains(assignment.targetName) {
+                accessorsByField[assignment.targetName, default: []].append(index)
+            }
+            for read in method.fieldReads
+            where read.receiver == nil && properties.contains(read.name) {
+                accessorsByField[read.name, default: []].append(index)
+            }
+        }
+        for accessors in accessorsByField.values {
+            for accessor in accessors.dropFirst() { components.union(accessors[0], accessor) }
+        }
+    }
+
+    /// Union members where one uses the other: a self call, or a read of a computed property. A call
+    /// names no overload, so it links every member sharing the called name.
+    private func linkByMutualCall(_ methods: [Member], into components: inout DisjointSet) {
+        let indicesByName = Dictionary(grouping: methods.indices, by: { methods[$0].name })
+        for (index, method) in methods.enumerated() {
+            let used = method.callSites.filter(callsSelf).map(\.methodName)
+                + method.fieldReads.filter { $0.receiver == nil }.map(\.name)
+            for name in used {
+                for target in indicesByName[name] ?? [] { components.union(index, target) }
+            }
+        }
+    }
+
+    private func callsSelf(_ call: CallSite) -> Bool {
+        switch call.receiver {
+        case .selfDispatch:
+            return true
+        case .type(let name):
+            return name == type.name
+        case .free, .unknown, .unresolvedTypeName, .propertyChain, .ownProperty, .ownPropertyElement, .ownMethodReturn:
+            return false
+        }
+    }
+}
+
+/// Union-find (disjoint-set) over integer nodes, with path compression.
+private struct DisjointSet {
+    private var parent: [Int]
+
+    init(count: Int) {
+        parent = Array(0..<count)
+    }
+
+    private mutating func root(of node: Int) -> Int {
+        var current = node
+        while parent[current] != current { current = parent[current] }
+        var walk = node
+        while parent[walk] != current { let next = parent[walk]; parent[walk] = current; walk = next }
+        return current
+    }
+
+    mutating func union(_ lhs: Int, _ rhs: Int) {
+        let left = root(of: lhs), right = root(of: rhs)
+        if left != right { parent[left] = right }
+    }
+
+    var componentCount: Int {
+        var roots = self
+        return Set((0..<parent.count).map { roots.root(of: $0) }).count
+    }
+
+    mutating func groups() -> [[Int]] {
+        var byRoot: [Int: [Int]] = [:]
+        for node in 0..<parent.count { byRoot[root(of: node), default: []].append(node) }
+        return Array(byRoot.values)
+    }
+}

@@ -1,0 +1,290 @@
+import Foundation
+import AcaiCore
+
+/// Projects an enriched `CodeArtifact` onto the cross-language `ContractShape`, removing *only*
+/// variation a language genuinely forces. Every rule below names the difference it exists for; none
+/// of them may paper over a missing member, a missing edge or a wrong kind — that is the whole point
+/// of the matrix, so a normalisation that could hide one does not belong here.
+///
+/// The rules:
+/// 1. **Locations are dropped.** Each language's snippet is a different file at a different line.
+/// 2. **Qualifiers are dropped.** A type is named by its simple name: Java requires a package, C++
+///    idiomatically wraps a namespace, `std::string` is `.`-free but `::`-qualified, and Swift, Dart
+///    and Python have no enclosing scope at all.
+/// 3. **Constructors become one role.** `init`, `constructor`, `__init__` and `Song` are all the
+///    language's spelling of the same construct, so the name is replaced by `<init>` and the role is
+///    `constructor` (a destructor likewise).
+/// 4. **Primitives and collections resolve through the language's own configuration** — never a table
+///    in this test — so `Int`/`int`/`number`/`double` is `#primitive` and `[X]`/`List<X>`/
+///    `std::vector<X>` is `#collection`.
+/// 5. **Access becomes its UML symbol**, the closed vocabulary the diagram layer consumes: Swift
+///    `internal` and Java package-private are the same `~`, `fileprivate` and `private` the same `-`.
+/// 6. **A type's kind becomes its UML stereotype.** `TypeKind.stereotypeString` is how the diagram
+///    layer names a kind, and it is the level at which a Swift `protocol` and a Java `interface` are
+///    the same declaration. It still distinguishes `class` from `struct` from `enumeration`, so a
+///    class mis-parsed as a struct is not hidden.
+/// 7. **`open` is dropped from a type's and a member's modifiers, and `abstract` from an interface
+///    and from its members.** Inheritability is spelled by *presence* in Kotlin and Swift and by the
+///    *absence* of `final` everywhere else, so the same inheritable class carries opposite markers;
+///    and an interface and its requirements are abstract by definition, which Dart's `abstract
+///    interface class` and Java's implicitly-abstract interface method must say out loud and a Swift
+///    `protocol` or a Kotlin `interface` must not. `abstract` on a *class* is kept, as it is on a
+///    *class*'s member — there it is a real choice the author made. `static` is dropped
+///    from a *nested type* for the same reason: a nested type that does not capture its enclosing
+///    instance is `static class` in Java and an unmarked `class` in Kotlin, C++, Python and Swift.
+///    `static` on a *member* is kept — that is a feature of its own.
+/// 8. **An annotation that restates a modifier already present is dropped.** Java and Dart spell
+///    override as `@override` *and* Kotlin/Swift/C++ as a keyword; Python spells abstract and static
+///    as `@abstractmethod`/`@staticmethod`. The modifier is the shared fact, so the duplicate
+///    annotation goes. An annotation with no matching modifier is always kept.
+/// 9. **A private member's leading privacy marker is dropped.** Dart, Python and JavaScript have no
+///    `private` keyword; the marker in the name is it, so the same member is `shut` in Swift and
+///    `_shut`, `__shut` or `#shut` there. Applied only where the parser already reports the member as
+///    private.
+/// 10. **Declarations and edges are sorted**; parameters are not. C++ groups members by access section
+///    and Python must declare `__init__` before it is used, so declaration order is not a shared
+///    property — but parameter order is.
+/// 11. **An enum case's constant rides with its name, and the plumbing carrying it is dropped.** A
+///    case takes its constant as `= 1` (Swift, TypeScript, Python, C, C++) or as a constructor
+///    argument, `pop(1)` (Java, Kotlin, Dart), so either way the case reads `pop = 1`. What differs
+///    is the overhead each spelling forces: Swift has to declare the raw-value type, and Java and
+///    Dart a constructor to receive the argument plus a property to hold it. So on an `enumeration`
+///    a `#primitive` supertype is dropped — its only meaning is naming the raw-value type — as is
+///    the conformance edge onto it, and, where a case really carries a constant, the constructor
+///    plus any stored property one of its parameters feeds. A method, a computed property, a
+///    non-primitive supertype, and a constructor on an enum whose cases carry no constant are kept.
+struct ContractNormalizer {
+    let configuration: LanguageConfiguration
+
+    static let primitiveToken = "#primitive"
+    static let collectionToken = "#collection"
+    static let constructorName = "<init>"
+    static let destructorName = "<deinit>"
+
+    func shape(of artifact: CodeArtifact) -> ContractShape {
+        ContractShape(
+            types: artifact.types.map { declaration(of: $0) }.sorted { $0.name < $1.name },
+            freeFunctions: artifact.freestandingFunctions
+                .map { signature(of: $0) }
+                .sorted(by: signatureOrder),
+            globals: artifact.globalVariables.map { signature(of: $0) }.sorted(by: signatureOrder),
+            relationships: artifact.relationships
+                .filter { !isRawValueConformance($0) }
+                .map(edge(of:))
+                .sorted { lhs, rhs in
+                    (lhs.kind, lhs.source, lhs.target) < (rhs.kind, rhs.source, rhs.target)
+                }
+        )
+    }
+
+    // MARK: - Declarations
+
+    private func declaration(of type: TypeDeclaration, isNested: Bool = false) -> ContractShape.Declaration {
+        let isInterface = type.kind == .interface || type.kind == .protocol
+        var implied: Set<Modifier> = isInterface ? [.open, .abstract] : [.open]
+        // `static` is implied for a nested *type* only; on a member it is a feature of its own.
+        let impliedForMembers = implied
+        if isNested { implied.insert(.static) }
+        return ContractShape.Declaration(
+            name: simpleName(type.name),
+            kind: type.kind.stereotypeString ?? type.kind.rawValue,
+            access: type.accessLevel.umlSymbol,
+            modifiers: type.modifiers.filter { !implied.contains($0) }.map(\.rawValue).sorted(),
+            generics: type.genericParameters.map(generic(of:)),
+            annotations: annotationNames(type.annotations, restating: type.modifiers),
+            supertypes: supertypes(of: type),
+            members: members(of: type)
+                .map { signature(of: $0, impliedModifiers: impliedForMembers) }
+                .sorted(by: signatureOrder),
+            enumCases: type.enumCases.map(enumCase(of:)).sorted(),
+            nested: type.nestedTypes
+                .map { declaration(of: $0, isNested: true) }
+                .sorted { $0.name < $1.name },
+            documentation: type.documentation
+        )
+    }
+
+    private func signature(
+        of member: Member, impliedModifiers: Set<Modifier> = [.open]
+    ) -> ContractShape.Signature {
+        // A stored property's initializer expression is per-language — `[]` in Swift, `listOf()` in
+        // Kotlin, absent in Java and C++ — so the calls it makes are not a shared property. A
+        // *method*'s calls and reads are, which is where the call and read features live.
+        let isStored = member.kind == .property && !member.isComputed
+        return ContractShape.Signature(
+            name: normalisedMemberName(member),
+            role: member.kind.rawValue,
+            access: member.accessLevel.umlSymbol,
+            modifiers: member.modifiers
+                .filter { !impliedModifiers.contains($0) }
+                .map(\.rawValue)
+                .sorted(),
+            annotations: annotationNames(member.annotations, restating: member.modifiers),
+            type: member.type.map { typeName(of: $0) },
+            parameters: member.parameters.map(parameter(of:)),
+            calls: isStored ? [] : member.callSites.map(call(of:)).sorted(),
+            reads: isStored ? [] : member.fieldReads.map { read in
+                read.receiver.map { "\(simpleName($0)).\(read.name)" } ?? read.name
+            }.sorted(),
+            documentation: member.documentation
+        )
+    }
+
+    /// Rule 11: `pop = 1` and `pop(1)` both read `pop = 1`.
+    private func enumCase(of enumCase: EnumCase) -> String {
+        guard let rawValue = enumCase.rawValue else { return enumCase.name }
+        return "\(enumCase.name) = \(rawValue)"
+    }
+
+    /// Rule 11: only Swift names the raw-value type, as `enum Genre: Int`.
+    private func supertypes(of type: TypeDeclaration) -> [String] {
+        let names = type.inheritedTypes.map { typeName(of: $0) }.sorted()
+        guard type.kind == .enum else { return names }
+        return names.filter { $0 != Self.primitiveToken }
+    }
+
+    /// Rule 11: drops the constructor and stored properties that `pop(1)` needs and `= 1` does not.
+    private func members(of type: TypeDeclaration) -> [Member] {
+        guard type.kind == .enum, type.enumCases.contains(where: { $0.rawValue != nil }) else {
+            return type.members
+        }
+        let received = Set(
+            type.members.filter { $0.kind == .initializer }.flatMap { $0.parameters.map(\.internalName) })
+        return type.members.filter { member in
+            guard member.kind != .initializer else { return false }
+            let isStored = member.kind == .property && !member.isComputed
+            return !(isStored && received.contains(member.name))
+        }
+    }
+
+    /// Rule 11: a conformance onto a primitive can only be Swift's raw-value declaration.
+    private func isRawValueConformance(_ relationship: Relationship) -> Bool {
+        relationship.kind == .conformance && classify(relationship.target) == Self.primitiveToken
+    }
+
+    private func generic(of parameter: GenericParameter) -> String {
+        let name = simpleName(parameter.name)
+        guard !parameter.constraints.isEmpty else { return name }
+        return name + ": " + parameter.constraints.map { typeName(of: $0.type) }.joined(separator: " & ")
+    }
+
+    private func signatureOrder(_ lhs: ContractShape.Signature, _ rhs: ContractShape.Signature) -> Bool {
+        (lhs.role, lhs.name, lhs.parameters.joined(separator: ",")) <
+            (rhs.role, rhs.name, rhs.parameters.joined(separator: ","))
+    }
+
+    /// Rule 3: a constructor is named after its type in Java/C++/Dart, `init` in Swift, `constructor`
+    /// in TS/JS and `__init__` in Python — the `MemberKind` is what they share.
+    private func normalisedMemberName(_ member: Member) -> String {
+        switch member.kind {
+        case .initializer:
+            return Self.constructorName
+        case .deinitializer:
+            return Self.destructorName
+        case .property, .method, .subscript:
+            return privacyMarkerStripped(member.name, isPrivate: member.accessLevel == .private)
+        }
+    }
+
+    /// Rule 9: Dart, Python and JavaScript have no `private` keyword — a leading marker *is* it
+    /// (Dart's `_x`, Python's name-mangled `__x`, JavaScript's `#x`), so the same member is `shut` in
+    /// Swift and `_shut`, `__shut` or `#shut` there. Applied only where the parser already reports the
+    /// member as private.
+    private func privacyMarkerStripped(_ name: String, isPrivate: Bool) -> String {
+        guard isPrivate else { return name }
+        return String(name.drop(while: { $0 == "_" || $0 == "#" }))
+    }
+
+    /// `defaultValue` is deliberately absent: no diagram, metric or diff reads it, so requiring every
+    /// parser to record it would pin something nothing renders. What the matrix does pin is that a
+    /// parameter carrying a default still appears at all, with its declared type.
+    private func parameter(of parameter: Parameter) -> String {
+        "\(parameter.internalName): \(parameter.type.map { typeName(of: $0) } ?? "?")"
+    }
+
+    private func call(of site: CallSite) -> String {
+        switch site.receiver {
+        case .selfDispatch:
+            return ".\(site.methodName)"
+        case .type(let name):
+            return "\(simpleName(name)).\(site.methodName)"
+        case .unresolvedTypeName(let name):
+            return "?\(simpleName(name)).\(site.methodName)"
+        case .free:
+            return "\(site.methodName)()"
+        case .propertyChain(let head, let hops):
+            return ([simpleName(head)] + hops + [site.methodName]).joined(separator: ".")
+        case .ownProperty(let property, let hops):
+            return (["self", property] + hops + [site.methodName]).joined(separator: ".")
+        case .ownPropertyElement(let property):
+            return "self.\(property)[].\(site.methodName)"
+        case .ownMethodReturn(let method, let hops):
+            return (["self", "\(method)()"] + hops + [site.methodName]).joined(separator: ".")
+        case .unknown:
+            return "?.\(site.methodName)"
+        }
+    }
+
+    private func edge(of relationship: Relationship) -> ContractShape.Edge {
+        ContractShape.Edge(
+            kind: relationship.kind.rawValue,
+            source: simpleName(relationship.source),
+            target: simpleName(relationship.target),
+            label: relationship.label,
+            multiplicity: relationship.targetLabel ?? relationship.sourceLabel
+        )
+    }
+
+    // MARK: - Names
+
+    /// Rule 4, then rule 2: classification runs on the name the parser produced (a C++ primitive is
+    /// spelled `std::string`), and only what survives it is reduced to a simple name.
+    func typeName(of reference: TypeReference) -> String {
+        let optional = reference.isOptional ? "?" : ""
+        let base = classify(reference.name)
+        guard base == Self.collectionToken || reference.isArray else { return base + optional }
+        var elements = reference.genericArguments.map { typeName(of: $0) }
+        // `Item[]` names its element in `name` with no generic arguments; `List<Item>` the other way.
+        if elements.isEmpty, base != Self.collectionToken { elements = [base] }
+        let inner = elements.isEmpty ? "" : "<\(elements.joined(separator: ","))>"
+        return Self.collectionToken + inner + optional
+    }
+
+    private func classify(_ name: String) -> String {
+        if configuration.isPrimitive(name) { return Self.primitiveToken }
+        if configuration.isCollectionType(name) { return Self.collectionToken }
+        let simple = simpleName(name)
+        if configuration.isPrimitive(simple) { return Self.primitiveToken }
+        if configuration.isCollectionType(simple) { return Self.collectionToken }
+        return simple
+    }
+
+    private func simpleName(_ name: String) -> String {
+        name.replacingOccurrences(of: "::", with: ".").components(separatedBy: ".").last ?? name
+    }
+
+    /// Kotlin/Java write `@Deprecated`, Python `@dataclass`, Dart `@override`, TypeScript `@Component()`
+    /// — the marker is the name, not its punctuation or argument list.
+    private func annotationName(of annotation: String) -> String {
+        let withoutAt = annotation.hasPrefix("@") ? String(annotation.dropFirst()) : annotation
+        let withoutArguments = withoutAt.components(separatedBy: "(").first ?? withoutAt
+        return simpleName(withoutArguments.trimmingCharacters(in: .whitespaces))
+    }
+
+    /// Rule 8: `@abstractmethod` beside `.abstract`, `@override` beside `.override` — the annotation is
+    /// the language's spelling of a modifier already recorded, so only the modifier survives. The
+    /// `method`/`property` suffix covers Python's `@staticmethod`/`@abstractmethod`.
+    private func annotationNames(_ annotations: [String], restating modifiers: [Modifier]) -> [String] {
+        let present = Set(modifiers.map { $0.rawValue.lowercased() })
+        return annotations
+            .map(annotationName(of:))
+            .filter { name in
+                let lowered = name.lowercased()
+                let stem = ["method", "property"].reduce(lowered) { stem, suffix in
+                    stem.hasSuffix(suffix) ? String(stem.dropLast(suffix.count)) : stem
+                }
+                return !present.contains(lowered) && !present.contains(stem)
+            }
+            .sorted()
+    }
+}

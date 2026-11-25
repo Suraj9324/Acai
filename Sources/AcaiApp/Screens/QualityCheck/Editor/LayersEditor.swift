@@ -1,0 +1,50 @@
+import SwiftUI
+import AcaiQuality
+
+/// Editor for the ordered-layer rule: dependencies may only flow downward through the listed layers
+/// (top → bottom). The whole rule is optional, gated behind an enable toggle.
+struct LayersEditor: View {
+    @Binding var rule: LayerRule?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: .spacingS) {
+            Toggle(.app("View.LayersEditor.EnforceLayering"), isOn: enabled)
+                .font(.headline)
+            if let binding = Binding($rule) {
+                enabledBody(binding)
+            }
+        }
+        .padding(.vertical, .spacingXS)
+    }
+
+    private var enabled: Binding<Bool> {
+        Binding(
+            get: { rule != nil },
+            set: { rule = $0 ? LayerRule(layers: []) : nil }
+        )
+    }
+
+    @ViewBuilder
+    private func enabledBody(_ rule: Binding<LayerRule>) -> some View {
+        Text(.app("View.LayersEditor.LayersTopHighestLevel")).font(.caption).foregroundStyle(.secondary)
+        ForEach(rule.layers.indices, id: \.self) { index in
+            RuleCard(onDelete: { rule.wrappedValue.layers.remove(at: index) }, content: {
+                TextField(text: rule.layers[index].name) {
+                    Text(.app("View.LayersEditor.LayerNameEG"))
+                }
+                .textFieldStyle(.roundedBorder)
+                SelectorEditor(title: .app("View.LayersEditor.Matches"), selector: rule.layers[index].selector)
+            })
+        }
+        HStack {
+            Button {
+                rule.wrappedValue.layers.append(LayerRule.Layer(name: "", selector: AcaiQuality.Selector()))
+            } label: {
+                Label(.app("View.LayersEditor.AddLayer"), systemImage: "plus.circle.fill")
+            }
+            .buttonStyle(.plain)
+            Spacer()
+            Toggle(.app("View.LayersEditor.AllowSkippingLayers"), isOn: rule.allowSkip)
+        }
+    }
+}

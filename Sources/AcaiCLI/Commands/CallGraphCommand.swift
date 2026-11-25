@@ -1,0 +1,206 @@
+import ArgumentParser
+import AcaiDiagram
+import AcaiLibrary
+
+extension AcaiCommand {
+    struct CallGraph: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "callgraph",
+            abstract: "Call-graph analysis: metrics, method cycles, or dead-code candidates",
+            discussion: """
+                deadcode reports members that no resolved call edge targets and that aren't \
+                reachable by contract — public API, an override, a protocol requirement, or one of \
+                the language's entry-point markers.
+
+                It scans methods in every language. A language's initializers and subscripts are \
+                scanned only where its parser records calls to them: a kind whose callers are never \
+                recorded has no edge to be found by, so scanning it would report every declaration \
+                of it as uncalled. The report names the kinds it actually scanned: a "Scanned:" line \
+                in human output, "scannedKinds" in JSON.
+                """
+        )
+
+        enum Mode: String, ExpressibleByArgument, CaseIterable {
+            case metrics
+            case cycles
+            case deadcode
+        }
+
+        @OptionGroup var artifactSource: ArtifactSource
+        @OptionGroup var generatedScope: GeneratedScopeOption
+
+        @Option(name: .long, help: "What to report: metrics (default), cycles, or deadcode.")
+        var mode: Mode = .metrics
+
+        @Option(name: .long, help: ArgumentHelp(
+            "Scope (metrics/cycles): \"type:Name\" or \"module:Name\". Whole codebase if omitted."))
+        var scope: String?
+
+        @Option(name: .long, help: "Report format: json (default) or human.")
+        var format: ReportFormatOption = .json
+
+        @Option(name: .long, help: "Limit the human metrics table to the top N hottest methods.")
+        var top: Int?
+
+        @Option(name: .long, help: "Output file path. Prints to stdout if omitted.")
+        var output: String?
+
+        @Flag(name: .long, help: "In cycles mode, exit 0 even when call cycles are found (don't fail CI).")
+        var noFail = false
+
+        mutating func validate() throws {
+            try artifactSource.validate()
+            // Convert a malformed --scope into a usage error (exit 64) instead of letting it crash later.
+            do {
+                _ = try CallGraphScopeOption(raw: scope).resolved()
+            } catch let error as DiagramRequestError {
+                throw ValidationError(error.message)
+            }
+        }
+
+        mutating func run() async throws {
+            let artifact = try await generatedScope.applied(to: artifactSource.resolve())
+            switch mode {
+            case .metrics:
+                try renderMetrics(artifact)
+            case .cycles:
+                try renderCycles(artifact)
+            case .deadcode:
+                try renderDeadCode(artifact)
+            }
+        }
+
+        // MARK: - metrics
+
+        private func renderMetrics(_ artifact: CodeArtifact) throws {
+            let callScope = try CallGraphScopeOption(raw: scope).resolved()
+            let report = CallGraphMetrics(artifact: artifact, scope: callScope).report
+            let rendered: String
+            if format == .json {
+                let payload = CallGraphMetricsPayload(
+                    callGraph: report, health: HealthCheck(artifact: artifact).summary)
+                rendered = try JSONReport(payload).text
+            } else {
+                rendered = metricsHuman(report)
+            }
+            try rendered.writeOutput(to: output, label: "call graph")
+        }
+
+        private func metricsHuman(_ report: AcaiDiagram.CallGraphMetrics.Report) -> String {
+            let coverage = Int((report.coverage.fraction * 100).rounded())
+            var lines = [
+                "Call graph: \(report.nodeCount) method(s), \(report.edgeCount) edge(s), "
+                + "\(coverage)% resolved."
+            ]
+            let rows = top.map { Array(report.nodes.prefix($0)) } ?? report.nodes
+            for node in rows {
+                let recursion = node.isRecursive ? " (recursive)" : ""
+                lines.append(
+                    "  \(node.label): in \(node.fanIn), out \(node.fanOut)\(recursion)\(node.location.suffix)")
+            }
+            return lines.joined(separator: "\n") + "\n"
+        }
+
+        // MARK: - cycles
+
+        private func renderCycles(_ artifact: CodeArtifact) throws {
+            let callScope = try CallGraphScopeOption(raw: scope).resolved()
+            let clusters = MethodCycles(artifact: artifact, scope: callScope).clusters
+            let rendered: String
+            if format == .json {
+                let payload = CallGraphCyclesPayload(
+                    cycles: clusters, health: HealthCheck(artifact: artifact).summary)
+                rendered = try JSONReport(payload).text
+            } else {
+                rendered = cyclesHuman(clusters)
+            }
+            try rendered.writeOutput(to: output, label: "call cycles")
+            if !clusters.isEmpty && !noFail { throw ExitCode.failure }
+        }
+
+        private func cyclesHuman(_ clusters: [MethodCycles.Cluster]) -> String {
+            guard !clusters.isEmpty else { return "No method-level call cycles found.\n" }
+            var lines = ["Found \(clusters.count) method-level call cycle(s):"]
+            for cluster in clusters {
+                let ids = cluster.methods.map(\.id).joined(separator: " → ")
+                lines.append("  \(ids)")
+            }
+            return lines.joined(separator: "\n") + "\n"
+        }
+
+        // MARK: - deadcode
+
+        private func renderDeadCode(_ artifact: CodeArtifact) throws {
+            let report = DeadCodeScan(
+                artifact: artifact,
+                languages: artifact.standardLanguageResolver).report
+            let rendered: String
+            if format == .json {
+                let payload = CallGraphDeadCodePayload(
+                    deadCode: report, health: HealthCheck(artifact: artifact).summary)
+                rendered = try JSONReport(payload).text
+            } else {
+                rendered = deadCodeHuman(report)
+            }
+            try rendered.writeOutput(to: output, label: "dead code")
+        }
+
+        private func deadCodeHuman(_ report: DeadCodeScan.Report) -> String {
+            let coverage = Int((report.coverage.fraction * 100).rounded())
+            guard !report.candidates.isEmpty else {
+                return "No dead-code candidates (call-graph coverage \(coverage)%).\n\(report.scopeLine)\n"
+            }
+            var lines = [
+                "\(report.candidates.count) dead-code candidate(s) "
+                + "— call-graph coverage \(coverage)% (candidates below this floor may be false positives):",
+                report.scopeLine
+            ]
+            for candidate in report.candidates {
+                lines.append("  \(candidate.id)\(candidate.location.suffix)")
+            }
+            return lines.joined(separator: "\n") + "\n"
+        }
+    }
+}
+
+/// `health` lets a consumer of `acai callgraph --format json` (any mode) tell whether the report
+/// rests on a trustworthy parse without a separate `acai analyze --health` round trip.
+private struct CallGraphMetricsPayload: Encodable {
+    var callGraph: AcaiDiagram.CallGraphMetrics.Report
+    var health: HealthCheck.Summary
+}
+
+private struct CallGraphCyclesPayload: Encodable {
+    var cycles: [MethodCycles.Cluster]
+    var health: HealthCheck.Summary
+}
+
+private struct CallGraphDeadCodePayload: Encodable {
+    var deadCode: DeadCodeScan.Report
+    var health: HealthCheck.Summary
+}
+
+private extension DeadCodeScan.Report {
+    /// Named in the header so "no candidates" can't be read as covering a kind no language scanned.
+    var scopeLine: String {
+        let kinds = scannedKinds.map(\.pluralName)
+        return "Scanned: \(kinds.isEmpty ? "nothing" : kinds.joined(separator: ", "))."
+    }
+}
+
+private extension MemberKind {
+    var pluralName: String {
+        switch self {
+        case .property:
+            "properties"
+        case .method:
+            "methods"
+        case .initializer:
+            "initializers"
+        case .deinitializer:
+            "deinitializers"
+        case .subscript:
+            "subscripts"
+        }
+    }
+}

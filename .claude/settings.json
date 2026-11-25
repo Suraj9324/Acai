@@ -1,0 +1,10 @@
+{
+  "enabledPlugins": {
+    "code-quality@acai": true
+  },
+  "attribution": {
+    "commit": "",
+    "pr": "",
+    "sessionUrl": false
+  }
+}

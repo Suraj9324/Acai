@@ -1,0 +1,36 @@
+import SwiftUI
+import AcaiQuality
+import AcaiCore
+
+/// Form controls for a `MemberFilter` — the member-level companion to `SelectorEditor`'s type-level
+/// `Selector`. Each facet is optional and AND-combined; an empty/off field leaves that facet unset.
+struct MemberFilterEditor: View {
+    let title: LocalizedStringResource
+    @Binding var filter: MemberFilter
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: .spacingXS) {
+            Text(localized: title).font(.caption.bold()).foregroundStyle(.secondary)
+            Picker(.app("View.MemberFilterEditor.Kind"), selection: $filter.kind) {
+                Text(.app("View.MemberFilterEditor.AnyKind")).tag(MemberKind?.none)
+                ForEach(MemberKind.allCases, id: \.self) { kind in
+                    Text(verbatim: kind.rawValue).tag(MemberKind?.some(kind))
+                }
+            }
+            .accessibilityIdentifier("inspect.memberFilter.kindPicker")
+            TextField(text: $filter.minParameters.asText) {
+                Text(.app("View.MemberFilterEditor.MinParametersEG"))
+            }
+            .textFieldStyle(.roundedBorder)
+            .accessibilityIdentifier("inspect.memberFilter.minParametersField")
+            // `.toggleStyle(.button)`: a native `Switch` isn't reliably tappable by identifier
+            // across platforms, matching `FindingsView.showSuppressedToggle`.
+            Toggle(.app("View.MemberFilterEditor.MutablePublicStateOnly"), isOn: $filter.isPublicVar.or(default: false))
+                .toggleStyle(.button)
+                .accessibilityIdentifier("inspect.memberFilter.mutablePublicStateToggle")
+            Toggle(.app("View.MemberFilterEditor.OverridesOnly"), isOn: $filter.isOverride.or(default: false))
+                .toggleStyle(.button)
+                .accessibilityIdentifier("inspect.memberFilter.overridesToggle")
+        }
+    }
+}

@@ -1,0 +1,310 @@
+import ArgumentParser
+import Foundation
+import Testing
+@testable import AcaiCLI
+
+/// Drives `AcaiCommand.Diagram.run()` for the error and success paths that only surface after
+/// parsing (entry-point/`--map`/scope/YAML parsing, on-the-fly analysis, file output).
+@Suite("Diagram Command Run")
+struct DiagramCommandRunTests {
+
+    private func expectRunError(_ arguments: [String], contains expected: String) async throws {
+        var cmd = try CLITestSupport.parseDiagram(arguments)
+        await #expect {
+            try await cmd.run()
+        } throws: { error in
+            CLITestSupport.message(for: error).contains(expected)
+        }
+    }
+
+    @Test func nonexistentSourceThrows() async throws {
+        try await expectRunError(
+            ["--source", CLITestSupport.nonexistentPath()],
+            contains: "Source directory does not exist:"
+        )
+    }
+
+    @Test func malformedSequenceEntryPointThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            // A leading/trailing dot is malformed; a bare name (no dot) denotes a top-level
+            // function entry point.
+            for bad in [".method", "Type."] {
+                try await expectRunError(
+                    ["--source", dir.path, "--sequence-from", bad],
+                    contains: "sequence entry point must be"
+                )
+            }
+        }
+    }
+
+    @Test func malformedMapThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            try await expectRunError(
+                ["--source", dir.path, "--sequence-from", "Service.run", "--map", "NoEquals"],
+                contains: "type mapping must be in the form"
+            )
+        }
+    }
+
+    @Test func malformedCallGraphScopeThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            try await expectRunError(
+                ["--source", dir.path, "--call-graph", "--call-graph-scope", "bogus:X"],
+                contains: "scope must start with"
+            )
+            try await expectRunError(
+                ["--source", dir.path, "--call-graph", "--call-graph-scope", "type:"],
+                contains: "scope must be"
+            )
+        }
+    }
+
+    @Test func malformedYAMLConfigThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            // A YAML sequence (list) instead of a top-level mapping.
+            let configURL = dir.appendingPathComponent("config.yml")
+            try "- a\n- b\n".write(to: configURL, atomically: true, encoding: .utf8)
+            try await expectRunError(
+                ["--source", dir.path, "--config", configURL.path],
+                contains: "Invalid YAML configuration"
+            )
+        }
+    }
+
+    @Test func unknownStoredAnalysisThrows() async throws {
+        try await expectRunError(
+            ["--from", "definitely-not-a-stored-analysis-\(UUID().uuidString)"],
+            contains: "Could not find analysis"
+        )
+    }
+
+    @Test func writesDotToOutputFile() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            let output = dir.appendingPathComponent("diagram.dot")
+            var cmd = try CLITestSupport.parseDiagram(
+                ["--source", dir.path, "--language", "swift", "--format", "dot", "--output", output.path]
+            )
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("digraph"))
+            #expect(contents.contains("Service"))
+        }
+    }
+
+    @Test func minAccessHidesLowerVisibilityMembers() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            let source = """
+            public class Widget {
+                public func show() {}
+                private func helper() {}
+            }
+            """
+            try source.write(to: dir.appendingPathComponent("Widget.swift"), atomically: true, encoding: .utf8)
+            let output = dir.appendingPathComponent("diagram.dot")
+            var cmd = try CLITestSupport.parseDiagram(
+                ["--source", dir.path, "--language", "swift", "--format", "dot",
+                 "--min-access", "public", "--output", output.path]
+            )
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("show"))
+            #expect(!contents.contains("helper"))
+        }
+    }
+
+    @Test func minAccessFiltersMiddleTiers() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            // `package` outranks `internal`, so `--min-access packagePrivate` keeps the package
+            // member and drops the internal one.
+            let source = """
+            public class Widget {
+                public func shown() {}
+                package func packaged() {}
+                internal func hidden() {}
+            }
+            """
+            try source.write(to: dir.appendingPathComponent("Widget.swift"), atomically: true, encoding: .utf8)
+            let output = dir.appendingPathComponent("diagram.dot")
+            var cmd = try CLITestSupport.parseDiagram(
+                ["--source", dir.path, "--language", "swift", "--format", "dot",
+                 "--min-access", "packagePrivate", "--output", output.path]
+            )
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("shown"))
+            #expect(contents.contains("packaged"))
+            #expect(!contents.contains("hidden"))
+        }
+    }
+
+    @Test func writesMermaidToOutputFile() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            let output = dir.appendingPathComponent("diagram.mmd")
+            var cmd = try CLITestSupport.parseDiagram(
+                ["--source", dir.path, "--language", "swift", "--format", "mermaid", "--output", output.path]
+            )
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("classDiagram"))
+        }
+    }
+
+    @Test func untraceableSequenceEntryPointThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            try await expectRunError(
+                ["--source", dir.path, "--sequence-from", "Service.missing"],
+                contains: "No calls could be traced"
+            )
+        }
+    }
+
+    @Test func exceedingMaxNodesThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            let source = """
+            class A {}
+            class B {}
+            class C {}
+            """
+            try source.write(to: dir.appendingPathComponent("Types.swift"), atomically: true, encoding: .utf8)
+            try await expectRunError(
+                ["--source", dir.path, "--language", "swift", "--max-nodes", "2"],
+                contains: "This diagram has 3 nodes, exceeding the limit of 2."
+            )
+        }
+    }
+
+    @Test func withinMaxNodesSucceeds() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try CLITestSupport.writeSampleSwiftSource(in: dir)
+            let output = dir.appendingPathComponent("diagram.dot")
+            var cmd = try CLITestSupport.parseDiagram(
+                ["--source", dir.path, "--language", "swift", "--format", "dot",
+                 "--max-nodes", "1000", "--output", output.path]
+            )
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("digraph"))
+        }
+    }
+
+    @Test func callGraphWithNoResolvableCallsThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            // A lone type with no call sites yields a call graph with no edges.
+            try "class Lonely { func idle() {} }".write(
+                to: dir.appendingPathComponent("Lonely.swift"), atomically: true, encoding: .utf8
+            )
+            try await expectRunError(
+                ["--source", dir.path, "--call-graph"],
+                contains: "No resolvable calls found"
+            )
+        }
+    }
+
+    // MARK: - --color-by
+
+    private func writeMaxParametersSource(in dir: URL) throws {
+        let source = """
+        class Wide {
+            func configure(a: Int, b: Int, c: Int) {}
+        }
+
+        class Narrow {
+            func run() {}
+        }
+        """
+        try source.write(to: dir.appendingPathComponent("Params.swift"), atomically: true, encoding: .utf8)
+    }
+
+    private func writeMaxParametersRules(in dir: URL) throws -> URL {
+        let rulesURL = dir.appendingPathComponent("quality.yml")
+        let yaml = """
+        budgets:
+          - metric: maxParameters
+            max: 3
+        """
+        try yaml.write(to: rulesURL, atomically: true, encoding: .utf8)
+        return rulesURL
+    }
+
+    @Test func colorByColorsAndAnnotatesNodesFromTheMetricsOwnBudget() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try writeMaxParametersSource(in: dir)
+            let rulesURL = try writeMaxParametersRules(in: dir)
+            let output = dir.appendingPathComponent("diagram.dot")
+            var cmd = try CLITestSupport.parseDiagram([
+                "--source", dir.path, "--language", "swift", "--format", "dot",
+                "--color-by", "maxParameters", "--rules", rulesURL.path,
+                "--output", output.path
+            ])
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("maxParameters: 3"))
+            #expect(contents.contains("maxParameters: 0"))
+            #expect(contents.contains("#C62828"))
+            #expect(contents.contains("#2E7D32"))
+        }
+    }
+
+    @Test func colorByUsesTheBuiltInDefaultBudgetsWhenNoRulesFileIsGiven() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try writeMaxParametersSource(in: dir)
+            let output = dir.appendingPathComponent("diagram.dot")
+            // `maxParameters` is one of `MetricBudget.defaultSmellBudgets` (max 5), so `--color-by`
+            // works without `--rules` — the same budget that gates a build without one also colours it.
+            var cmd = try CLITestSupport.parseDiagram([
+                "--source", dir.path, "--language", "swift", "--format", "dot",
+                "--color-by", "maxParameters", "--output", output.path
+            ])
+            try await cmd.run()
+            let contents = try String(contentsOf: output, encoding: .utf8)
+            #expect(contents.contains("maxParameters: 3"))
+            #expect(contents.contains("maxParameters: 0"))
+        }
+    }
+
+    @Test func colorByWithoutAMatchingBudgetThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try writeMaxParametersSource(in: dir)
+            // `fanOut` has no entry in the built-in default budgets.
+            try await expectRunError(
+                ["--source", dir.path, "--language", "swift", "--color-by", "fanOut"],
+                contains: "No budget with a `max` threshold is defined for metric 'fanOut'"
+            )
+        }
+    }
+
+    @Test func colorByWithABudgetThatHasNoMaxThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try writeMaxParametersSource(in: dir)
+            let rulesURL = dir.appendingPathComponent("quality.yml")
+            let yaml = """
+            budgets:
+              - metric: maxParameters
+                min: 1
+            """
+            try yaml.write(to: rulesURL, atomically: true, encoding: .utf8)
+            try await expectRunError(
+                ["--source", dir.path, "--language", "swift",
+                 "--color-by", "maxParameters", "--rules", rulesURL.path],
+                contains: "No budget with a `max` threshold is defined for metric 'maxParameters'"
+            )
+        }
+    }
+
+    @Test func colorByWithAModuleScopedMetricThrows() async throws {
+        try await CLITestSupport.withTempDirectory { dir in
+            try writeMaxParametersSource(in: dir)
+            try await expectRunError(
+                ["--source", dir.path, "--language", "swift", "--color-by", "instability"],
+                contains: "is a per-module metric"
+            )
+        }
+    }
+}

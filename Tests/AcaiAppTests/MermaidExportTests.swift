@@ -1,0 +1,43 @@
+import Foundation
+import Testing
+@testable import AcaiApp
+@testable import AcaiCore
+
+@Suite("Mermaid Export", .timeLimit(.minutes(1)))
+@MainActor
+struct MermaidExportTests {
+
+    private func makeModel() -> (ProjectBrowserViewModel, UUID) {
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("acai-mermaid-export-\(UUID().uuidString)", isDirectory: true)
+        let store = ProjectStore(
+            baseDir: tempDir, analysisStore: AnalysisStore(directory: tempDir.appendingPathComponent("analysis-store")))
+        let codebaseID = UUID()
+        store.projects = [
+            Project(
+                title: "P", subtitle: "",
+                codebases: [Codebase(id: codebaseID, name: "C", directoryPath: tempDir.path)]
+            )
+        ]
+        let artifact = CodeArtifact(
+            metadata: .init(sourceLanguage: .swift, filePaths: ["Widget.swift"]),
+            types: [TypeDeclaration(id: "Widget", name: "Widget", qualifiedName: "Widget", kind: .class,
+                accessLevel: .public)]
+        )
+        store.saveArtifact(artifact, for: codebaseID)
+        return (ProjectBrowserViewModel(store: store), codebaseID)
+    }
+
+    @Test func generatesMermaidForKnownCodebase() async {
+        let (model, codebaseID) = makeModel()
+        let mermaid = await model.generateMermaid(for: codebaseID)
+        #expect(mermaid.hasPrefix("classDiagram"))
+        #expect(mermaid.contains("Widget"))
+    }
+
+    @Test func unknownCodebaseYieldsEmptyClassDiagram() async {
+        let (model, _) = makeModel()
+        let mermaid = await model.generateMermaid(for: UUID())
+        #expect(mermaid == "classDiagram\n")
+    }
+}

@@ -1,0 +1,32 @@
+import XCTest
+
+@MainActor
+final class QuickOpenScreen {
+    let app: XCUIApplication
+
+    init(app: XCUIApplication) {
+        self.app = app
+    }
+
+    var searchField: XCUIElement { app.textFields["quickOpen.searchField"] }
+    var loadingState: XCUIElement { app.descendants(matching: .any)["quickOpen.loadingState"] }
+    var emptyState: XCUIElement { app.descendants(matching: .any)["quickOpen.emptyState"] }
+    var noResultsState: XCUIElement { app.descendants(matching: .any)["quickOpen.noResultsState"] }
+    var cancelButton: XCUIElement { app.buttons["quickOpen.cancelButton"] }
+
+    /// `id` is a `QuickOpenEntry.id` (e.g. `"type:MyModule.MyType"`).
+    func result(id: String) -> XCUIElement {
+        app.descendants(matching: .any)["quickOpen.result.\(id)"]
+    }
+
+    /// Types `text` and waits for `expected`, retyping if it never arrives. Quick Open re-filters on
+    /// query *changes* only, so a query landing before the index finished building filters an empty
+    /// list and never re-runs — retyping is what recovers from that, which a plain wait can't do.
+    /// Typing a query has no side effect, so the retry is safe.
+    /// Types once: a query entered before the index finished building now filters again when the
+    /// entries land, so there is nothing for a retype to recover from.
+    func search(_ text: String, until expected: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        searchField.clearAndTypeText(text, file: file, line: line)
+        expected.waitOrFail("the Quick Open result for '\(text)'", file: file, line: line)
+    }
+}

@@ -1,0 +1,482 @@
+import CoreGraphics
+import Foundation
+import AcaiCore
+import AcaiDiagram
+import AcaiGit
+import AcaiLibrary
+import AcaiRender
+import AcaiQuality
+
+// Diagram-management collaborators carved out of `ProjectBrowserViewModel` (it had grown into a
+// god-object). Each is a thin value over the shared `ProjectStore` reference plus the owning view
+// model's change hooks, so behaviour is identical: `persist` = save + `objectWillChange`, `notify`
+// = `objectWillChange` only. The view model exposes them as `diagrams` / `freeforms`; views call
+// e.g. `model.diagrams.rename(...)`.
+
+@MainActor
+struct GeneratedDiagramEditor {
+    let store: ProjectStore
+    let persist: () -> Void
+    let notify: () -> Void
+
+    func add(to projectID: UUID, codebaseID: UUID, content: GeneratedDiagram.Content) -> UUID? {
+        guard let projectIndex = store.projects.firstIndex(where: { $0.id == projectID }) else { return nil }
+        var diagram = GeneratedDiagram(name: "", content: content, codebaseID: codebaseID)
+        diagram.name = diagram.autoName(
+            codebaseName: codebaseName(codebaseID), artifact: store.artifacts[codebaseID])
+        store.projects[projectIndex].generatedDiagramIDs.append(diagram.id)
+        store.saveGeneratedDiagram(diagram)
+        persist()
+        return diagram.id
+    }
+
+    /// Reuses an unfiltered, non-comparison diagram of the same content instead of adding a duplicate.
+    func addOrReuse(to projectID: UUID, codebaseID: UUID, content: GeneratedDiagram.Content) -> UUID? {
+        let existing = store.projects.first { $0.id == projectID }?.generatedDiagramIDs.first { id in
+            guard let diagram = store.generatedDiagrams[id] else { return false }
+            return diagram.codebaseID == codebaseID && diagram.content == content
+                && diagram.comparisonGitRef == nil && diagram.packageDiagramFilter == nil
+                && diagram.callGraphFilter == nil
+        }
+        return existing ?? add(to: projectID, codebaseID: codebaseID, content: content)
+    }
+
+    /// Updates the entry-point configuration of a sequence diagram, clearing saved positions (the
+    /// participant set may have changed).
+    func updateSequenceConfiguration(diagramID: UUID, configuration: SequenceDiagramConfiguration) {
+        mutate(diagramID, clearPositions: true) { $0.sequenceConfiguration = configuration }
+    }
+
+    /// Updates the scope of a call graph, clearing saved positions (the method set changes with scope).
+    func updateCallGraphScope(diagramID: UUID, scope: CallGraphScope) {
+        mutate(diagramID, clearPositions: true) { $0.callGraphScope = scope }
+    }
+
+    func updateStateConfiguration(diagramID: UUID, configuration: StateDiagramConfiguration) {
+        mutate(diagramID, clearPositions: true) { $0.stateConfiguration = configuration }
+    }
+
+    /// Updates a state diagram's selector filter, keeping the rest of the configuration and the
+    /// saved positions — filtering only removes states/transitions, it never repositions a
+    /// surviving one.
+    func updateStateFilter(diagramID: UUID, filter: AcaiQuality.Selector?) {
+        mutate(diagramID, clearPositions: false) { $0.stateConfiguration?.filter = filter }
+    }
+
+    /// Updates the rendering configuration of a class diagram (positions kept — a render-option change
+    /// never alters the type set).
+    func updateClassDiagramConfiguration(diagramID: UUID, configuration: ClassDiagramConfiguration) {
+        mutate(diagramID, clearPositions: false) { $0.classConfiguration = configuration }
+    }
+
+    /// Updates a package diagram's selector filter. Positions are kept: filtering only removes
+    /// nodes/edges, it never changes what a surviving node's saved position means.
+    func updatePackageDiagramFilter(diagramID: UUID, filter: AcaiQuality.Selector?) {
+        mutate(diagramID, clearPositions: false) { $0.packageDiagramFilter = filter }
+    }
+
+    func updateCallGraphFilter(diagramID: UUID, filter: AcaiQuality.Selector?) {
+        mutate(diagramID, clearPositions: false) { $0.callGraphFilter = filter }
+    }
+
+    /// Updates a sequence diagram's selector filter, keeping the rest of the configuration and —
+    /// unlike `updateSequenceConfiguration` — the saved positions, since filtering only removes
+    /// participants/messages.
+    func updateSequenceFilter(diagramID: UUID, filter: AcaiQuality.Selector?) {
+        mutate(diagramID, clearPositions: false) { $0.sequenceConfiguration?.filter = filter }
+    }
+
+    /// `debounced` is for saves a user can produce in a burst — recentring the canvas on every
+    /// search match — where writing the file on each one stutters the pan animation.
+    func updatePositions(
+        diagramID: UUID,
+        positions: [String: CGPoint],
+        sizes: [String: CGSize] = [:],
+        scale: CGFloat,
+        offset: CGPoint,
+        debounced: Bool = false
+    ) {
+        guard var diagram = store.generatedDiagrams[diagramID] else { return }
+        diagram.nodePositions = positions.mapValues { .init(point: $0) }
+        if !sizes.isEmpty {
+            diagram.nodeSizes = sizes.mapValues { .init(size: $0) }
+        }
+        diagram.canvasScale = Double(scale)
+        diagram.canvasOffsetX = Double(offset.x)
+        diagram.canvasOffsetY = Double(offset.y)
+        diagram.lastModified = Date()
+        if debounced {
+            store.saveGeneratedDiagramDebounced(diagram)
+        } else {
+            store.saveGeneratedDiagram(diagram)
+        }
+        notify()
+    }
+
+    func rename(_ diagramID: UUID, name: String) {
+        guard var diagram = store.generatedDiagrams[diagramID] else { return }
+        diagram.name = name
+        diagram.isNameUserDefined = true
+        diagram.lastModified = Date()
+        store.saveGeneratedDiagram(diagram)
+        notify()
+    }
+
+    /// Copies `diagramID`'s configuration and arrangement (positions, sizes, canvas transform) into
+    /// a new, independent diagram in the same project. The name is frozen (`isNameUserDefined =
+    /// true`) so it doesn't immediately diverge from the original's the moment the copy's
+    /// configuration is next edited.
+    func duplicate(_ diagramID: UUID) -> UUID? {
+        guard let original = store.generatedDiagrams[diagramID] else { return nil }
+        guard let projectIndex = store.projects.firstIndex(where: { $0.generatedDiagramIDs.contains(diagramID) })
+        else { return nil }
+        var copy = original
+        copy.id = UUID()
+        copy.name = original.name + " Copy"
+        copy.isNameUserDefined = true
+        copy.createdDate = Date()
+        copy.lastModified = Date()
+        store.projects[projectIndex].generatedDiagramIDs.append(copy.id)
+        store.saveGeneratedDiagram(copy)
+        persist()
+        return copy.id
+    }
+
+    func remove(_ diagramID: UUID) {
+        for i in store.projects.indices {
+            store.projects[i].generatedDiagramIDs.removeAll { $0 == diagramID }
+        }
+        store.deleteGeneratedDiagramFile(diagramID)
+        persist()
+    }
+
+    /// Creates a new class diagram scoped to exactly `selectedNodeIDs`: a fresh, independent copy
+    /// of `diagramID` whose selector filter is replaced with an `explicitIDs`-only one pinned to
+    /// the selection. Replacing rather than merging with any existing filter loses nothing — the
+    /// selection was already drawn from whatever that filter let through — and keeps the result
+    /// unambiguous. Positions/sizes for nodes outside the selection are dropped since they no
+    /// longer render. Returns `nil` for `diagramID`s with no selector-filter concept to restrict
+    /// (every content type other than a class diagram, for now — package/call graph diagrams
+    /// filter at module/type granularity, which doesn't line up node-for-node with an arbitrary
+    /// selection the way a class diagram's `filter` does).
+    func createDiagramFromSelection(_ diagramID: UUID, selectedNodeIDs: Set<String>) -> UUID? {
+        guard !selectedNodeIDs.isEmpty, let original = store.generatedDiagrams[diagramID] else { return nil }
+        guard case .classDiagram(var config) = original.content else { return nil }
+        guard let projectIndex = store.projects.firstIndex(where: { $0.generatedDiagramIDs.contains(diagramID) })
+        else { return nil }
+
+        config.filter = AcaiQuality.Selector(explicitIDs: selectedNodeIDs)
+        var copy = original
+        copy.id = UUID()
+        copy.content = .classDiagram(config)
+        copy.name = original.name + " Selection"
+        copy.isNameUserDefined = true
+        copy.nodePositions = original.nodePositions.filter { selectedNodeIDs.contains($0.key) }
+        copy.nodeSizes = original.nodeSizes.filter { selectedNodeIDs.contains($0.key) }
+        copy.createdDate = Date()
+        copy.lastModified = Date()
+        store.projects[projectIndex].generatedDiagramIDs.append(copy.id)
+        store.saveGeneratedDiagram(copy)
+        persist()
+        return copy.id
+    }
+
+    /// Applies `transform` to the stored diagram, re-auto-names it (unless user-renamed), bumps
+    /// `lastModified`, persists the diagram, and notifies. `clearPositions` drops saved node
+    /// positions when the configuration change can alter the node set.
+    func mutate(_ diagramID: UUID, clearPositions: Bool, _ transform: (inout GeneratedDiagram) -> Void) {
+        guard var diagram = store.generatedDiagrams[diagramID] else { return }
+        transform(&diagram)
+        if clearPositions {
+            diagram.nodePositions = [:]
+        }
+        if !diagram.isNameUserDefined {
+            diagram.name = diagram.autoName(
+                codebaseName: codebaseName(diagram.codebaseID), artifact: store.artifacts[diagram.codebaseID])
+        }
+        diagram.lastModified = Date()
+        store.saveGeneratedDiagram(diagram)
+        notify()
+    }
+
+    // Not `private`: `ProjectBrowserDiagramEditors+Cycle.swift`'s extension needs it too — same
+    // "not private, another file's extension needs it too" pattern used throughout this app.
+    func codebaseName(_ codebaseID: UUID) -> String {
+        for project in store.projects {
+            if let codebase = project.codebases.first(where: { $0.id == codebaseID }) { return codebase.name }
+        }
+        return ""
+    }
+}
+
+@MainActor
+struct ProjectCodebaseEditor {
+    let store: ProjectStore
+    let persist: () -> Void
+    let notify: () -> Void
+    /// Drops a codebase's cached analysis, so its code-quality check recomputes after a rules change
+    /// the analysis token can't see (an in-place edit that keeps the same rules path).
+    let invalidateAnalysis: (UUID) -> Void
+    /// Real network clone/fetch, swapped for a fixture under a UI test — see `GitRemoteService`.
+    var remoteService: GitRemoteService = GitRemoteServiceResolver().resolve()
+    var analyzers: CodebaseAnalyzerProviding = CodebaseAnalyzingResolver()
+
+    // MARK: Projects
+
+    @discardableResult
+    func addProject(title: String, subtitle: String) -> UUID {
+        let project = Project(title: title, subtitle: subtitle, codebases: [])
+        store.projects.append(project)
+        persist()
+        return project.id
+    }
+
+    func removeProject(_ projectID: UUID) {
+        guard let project = store.projects.first(where: { $0.id == projectID }) else { return }
+        for did in project.generatedDiagramIDs {
+            store.deleteGeneratedDiagramFile(did)
+        }
+        for did in project.freeformDiagramIDs {
+            store.deleteFreeformDiagramFile(did)
+        }
+        store.deleteProjectFile(projectID)
+        store.projects.removeAll { $0.id == projectID }
+        persist()
+    }
+
+    // MARK: Codebases
+
+    /// `repository` is the picked folder's `origin` remote, `nil` for a plain folder; a taken `name` is numbered.
+    @discardableResult
+    func addCodebase(
+        to projectID: UUID, name: String, directoryURL: URL,
+        securityScopedBookmark: SecurityScopedBookmark? = nil, repository: CodebaseRepositoryReference? = nil
+    ) -> UUID? {
+        guard let index = store.projects.firstIndex(where: { $0.id == projectID }) else { return nil }
+        let codebase = Codebase(
+            name: uniqueCodebaseName(name, inProjectAt: index), directoryPath: directoryURL.path,
+            securityScopedBookmark: securityScopedBookmark, repository: repository)
+        store.projects[index].codebases.append(codebase)
+        persist()
+        return codebase.id
+    }
+
+    func uniqueCodebaseName(_ proposed: String, inProjectAt index: Int) -> String {
+        UniqueCodebaseName(proposed: proposed, taken: store.projects[index].codebases.map(\.name)).value
+    }
+
+    func updateCodebase(id: UUID, name: String) {
+        for i in store.projects.indices {
+            if let j = store.projects[i].codebases.firstIndex(where: { $0.id == id }) {
+                store.projects[i].codebases[j].name = name
+                persist()
+                return
+            }
+        }
+    }
+
+    /// Re-points an existing codebase at another folder — the recovery from a directory that was
+    /// deleted, moved off a bookmark, or that the sandbox no longer grants access to. Updates the
+    /// codebase in place rather than adding one, so its diagrams and artifact survive.
+    @discardableResult
+    func relocateCodebase(
+        id: UUID, directoryURL: URL, securityScopedBookmark: SecurityScopedBookmark?
+    ) -> Task<OperationOutcome, Never> {
+        mutateCodebase(id) {
+            $0.directoryPath = directoryURL.path
+            $0.securityScopedBookmark = securityScopedBookmark
+            // The indexed artifact describes the *old* folder. Drop it up front rather than after
+            // the reindex, so a reindex that fails leaves the codebase honestly un-indexed instead
+            // of resolving diagrams against a path it no longer points at. The artifact *file*
+            // stays until the reindex overwrites it.
+            $0.hasArtifact = false
+        }
+        store.artifacts.removeValue(forKey: id)
+        invalidateAnalysis(id)
+        return Task { await reindex(codebaseID: id) }
+    }
+
+    /// The codebase leaves the store before its worktree is removed, so the row disappears at once
+    /// and the git work that follows can be awaited.
+    func removeCodebase(_ codebaseID: UUID) async {
+        let removedCodebase = codebase(for: codebaseID)
+        for i in store.projects.indices {
+            store.deleteCodebaseData(codebaseID, fromProjectAt: i)
+        }
+        persist()
+        if removedCodebase?.managedCheckout != nil {
+            await removeWorktree(codebaseID: codebaseID, repository: removedCodebase?.repository)
+        }
+    }
+
+    /// Deregisters and deletes a codebase's linked worktree, and the shared hub clone with it once no
+    /// other codebase's worktree is left on it.
+    func removeWorktree(codebaseID: UUID, repository: CodebaseRepositoryReference?) async {
+        let worktreeDirectory = store.gitWorktreeURL(for: codebaseID)
+        guard let repository else {
+            try? FileManager.default.removeItem(at: worktreeDirectory)
+            return
+        }
+        let sync = GitWorktreeSync(
+            transportURL: repository.remoteURL, ref: repository.ref,
+            hubStoreDirectory: store.gitRepositoriesDir, locks: store.gitRepositoryLocks)
+        defer { store.repositoryChanges.send(repository.remoteURL) }
+        guard sync.hub.isCloned else {
+            try? FileManager.default.removeItem(at: worktreeDirectory)
+            return
+        }
+        do {
+            try await sync.removeWorktree(named: store.gitWorktreeName(for: codebaseID))
+        } catch {
+            store.report(.app("Error.ProjectBrowserViewModel.RemoveCloneFailed \(error.localizedDescription)"))
+        }
+    }
+
+    // MARK: Quality-check rules
+
+    func setQualityCheckRulesPath(
+        codebaseID: UUID, path: String, securityScopedBookmark: SecurityScopedBookmark? = nil
+    ) {
+        mutateCodebase(codebaseID) {
+            $0.qualityCheck = QualityCheckConfiguration(rulesPath: path, securityScopedBookmark: securityScopedBookmark)
+        }
+        invalidateAnalysis(codebaseID)
+    }
+
+    func saveAuthoredRules(codebaseID: UUID, rules: QualityRules) {
+        do {
+            let url = try store.saveManagedRules(rules, forCodebase: codebaseID)
+            mutateCodebase(codebaseID) { $0.qualityCheck = QualityCheckConfiguration(rulesPath: url.path) }
+            invalidateAnalysis(codebaseID)
+        } catch {
+            store.report(.app("Error.ProjectBrowserViewModel.SaveQualityRulesFailed \(error.localizedDescription)"))
+        }
+    }
+
+    /// The rules to seed the form editor with: the codebase's managed rules when app-managed,
+    /// otherwise an empty rule set (external files are referenced, not form-edited).
+    func loadEditableRules(codebaseID: UUID) -> QualityRules {
+        guard let path = codebase(for: codebaseID)?.qualityCheck?.rulesPath, store.isManaged(path: path)
+        else { return QualityRules() }
+        return store.loadManagedRules(forCodebase: codebaseID) ?? QualityRules()
+    }
+
+    // MARK: Helpers
+
+    // Not `private`: `ProjectBrowserDiagramEditors+GitHubSync.swift`'s extension (a separate file,
+    // kept there only to stay under this file's own line-count limit) needs to call these too —
+    // same "not private, another file's extension needs it too" pattern used throughout this app.
+    func mutateCodebase(_ codebaseID: UUID, _ transform: (inout Codebase) -> Void) {
+        for i in store.projects.indices {
+            if let j = store.projects[i].codebases.firstIndex(where: { $0.id == codebaseID }) {
+                transform(&store.projects[i].codebases[j])
+                persistProject(store.projects[i].id)
+                return
+            }
+        }
+    }
+
+    func setGuidedRoute(_ offer: GuidedRouteOffer, codebaseID: UUID) {
+        mutateCodebase(codebaseID) { $0.guidedRoute = offer }
+    }
+
+    func persistProject(_ projectID: UUID) {
+        if let project = store.projects.first(where: { $0.id == projectID }) { store.saveProject(project) }
+        notify()
+    }
+
+    func codebase(for codebaseID: UUID) -> Codebase? {
+        for project in store.projects {
+            if let codebase = project.codebases.first(where: { $0.id == codebaseID }) { return codebase }
+        }
+        return nil
+    }
+
+    func projectID(for codebaseID: UUID) -> UUID? {
+        store.projects.first { $0.codebases.contains { $0.id == codebaseID } }?.id
+    }
+}
+
+@MainActor
+struct FreeformDiagramEditor {
+    let store: ProjectStore
+    let persist: () -> Void
+    let notify: () -> Void
+
+    func add(to projectID: UUID, name: String) -> UUID? {
+        guard let projectIndex = store.projects.firstIndex(where: { $0.id == projectID }) else { return nil }
+        let diagram = FreeformDiagram(name: name)
+        store.projects[projectIndex].freeformDiagramIDs.append(diagram.id)
+        store.saveFreeformDiagram(diagram)
+        persist()
+        return diagram.id
+    }
+
+    func update(diagramID: UUID, diagram: FreeformDiagram) {
+        var updated = diagram
+        updated.lastModified = Date()
+        store.saveFreeformDiagram(updated)
+        notify()
+    }
+
+    func rename(_ diagramID: UUID, name: String) {
+        guard var diagram = store.freeformDiagrams[diagramID] else { return }
+        diagram.name = name
+        diagram.lastModified = Date()
+        store.saveFreeformDiagram(diagram)
+        notify()
+    }
+
+    /// Copies `diagramID`'s nodes, edges and checkpoints into a new, independent diagram in the same
+    /// project. Node/edge ids are copied verbatim (they're only ever referenced by sibling
+    /// nodes/edges within the same diagram, never from outside it), so the copy renders identically
+    /// to the original at the moment of duplication.
+    func duplicate(_ diagramID: UUID) -> UUID? {
+        guard let original = store.freeformDiagrams[diagramID] else { return nil }
+        guard let projectIndex = store.projects.firstIndex(where: { $0.freeformDiagramIDs.contains(diagramID) })
+        else { return nil }
+        var copy = original
+        copy.id = UUID()
+        copy.name = original.name + " Copy"
+        copy.createdDate = Date()
+        copy.lastModified = Date()
+        store.projects[projectIndex].freeformDiagramIDs.append(copy.id)
+        store.saveFreeformDiagram(copy)
+        persist()
+        return copy.id
+    }
+
+    func remove(_ diagramID: UUID) {
+        for i in store.projects.indices {
+            store.projects[i].freeformDiagramIDs.removeAll { $0 == diagramID }
+        }
+        store.deleteFreeformDiagramFile(diagramID)
+        persist()
+    }
+
+    /// Creates a new freeform diagram containing exactly the selected nodes, plus the edges
+    /// between them (an edge survives only when both its endpoints are selected) — the freeform
+    /// equivalent of `GeneratedDiagramEditor.createDiagramFromSelection`. Node/edge ids are copied
+    /// verbatim, same as `duplicate(_:)`; checkpoints are not carried over since they reference the
+    /// full original node/edge set.
+    func createDiagramFromSelection(_ diagramID: UUID, selectedNodeIDs: Set<String>) -> UUID? {
+        guard !selectedNodeIDs.isEmpty, let original = store.freeformDiagrams[diagramID] else { return nil }
+        guard let projectIndex = store.projects.firstIndex(where: { $0.freeformDiagramIDs.contains(diagramID) })
+        else { return nil }
+
+        var copy = original
+        copy.id = UUID()
+        copy.name = original.name + " Selection"
+        copy.nodes = original.nodes.filter { selectedNodeIDs.contains($0.id) }
+        copy.edges = original.edges.filter {
+            selectedNodeIDs.contains($0.sourceNodeID) && selectedNodeIDs.contains($0.targetNodeID)
+        }
+        copy.checkpoints = []
+        copy.createdDate = Date()
+        copy.lastModified = Date()
+        store.projects[projectIndex].freeformDiagramIDs.append(copy.id)
+        store.saveFreeformDiagram(copy)
+        persist()
+        return copy.id
+    }
+}

@@ -1,0 +1,426 @@
+import SwiftUI
+import AcaiCore
+import AcaiDiagram
+import AcaiRender
+
+// MARK: - Canvas Layers & Node Interaction
+
+extension FreeformDiagramView {
+
+    // MARK: - Canvas Context Menu
+
+    @ViewBuilder
+    var canvasContextMenu: some View {
+        // Touch-reachable equivalents of the hidden keyboard-shortcut buttons above — delete/copy/
+        // cut require a selection; paste and select-all are always offered.
+        if !viewModel.selectedNodeIDs.isEmpty || viewModel.selectedEdgeID != nil {
+            Button {
+                showDeleteConfirmation = true
+            } label: {
+                Label(.app("View.FreeformDiagramView.DeleteMenu"), systemImage: "trash")
+            }
+            Button {
+                viewModel.clipboard.copySelection()
+            } label: {
+                Label(.app("View.FreeformDiagramView.Copy"), systemImage: "doc.on.doc")
+            }
+            Button {
+                viewModel.clipboard.cutSelection()
+            } label: {
+                Label(.app("View.FreeformDiagramView.Cut"), systemImage: "scissors")
+            }
+            Divider()
+        }
+        Button {
+            viewModel.clipboard.paste()
+        } label: {
+            Label(.app("View.FreeformDiagramView.Paste"), systemImage: "doc.on.clipboard")
+        }
+        Button {
+            viewModel.selectAll()
+        } label: {
+            Label(.app("View.FreeformDiagramView.SelectAll"), systemImage: "checklist")
+        }
+        Divider()
+        ForEach(FreeformDiagramNodeKind.CatalogGroup.allCases, id: \.rawValue) { group in
+            Menu(group.rawValue) {
+                ForEach(FreeformDiagramNodeKind.cases(in: group)) { kind in
+                    Button {
+                        let canvasPoint = CGPoint(
+                            x: (cursorLocation.x - canvasOffset.x) / canvasScale,
+                            y: (cursorLocation.y - canvasOffset.y) / canvasScale
+                        )
+                        insertNode(kind: kind, at: canvasPoint)
+                    } label: {
+                        Label(kind.displayName, systemImage: kind.systemImage)
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Edge Layer
+
+    func edgeLayer(rotors: DiagramRotorPlan) -> some View {
+        // Sequence messages are drawn by `sequenceLayer` through the shared layout.
+        let messageEdgeIDs = Set(viewModel.sequence.messageEdges.map(\.id))
+        return ForEach(viewModel.edges.filter { !messageEdgeIDs.contains($0.id) }) { edge in
+            RelationshipEdgeView(
+                kind: edge.kind,
+                sourceRect: viewModel.nodeRect(edge.sourceNodeID),
+                targetRect: viewModel.nodeRect(edge.targetNodeID),
+                // Transitions draw their UML `event [guard] / action` label; ordinary
+                // relationship edges show their free-form label, when set.
+                label: edge.transition?.label ?? edge.label,
+                accessibilityDescription: rotors.edgeAccessibility(
+                    of: edge.rotorID, identifier: edge.rotorID, namespace: rotorNamespace
+                ) ?? DiagramElementDescription(
+                    freeformEdge: edge,
+                    sourceName: nodeNames[edge.sourceNodeID] ?? "",
+                    targetName: nodeNames[edge.targetNodeID] ?? ""
+                ).edgeAccessibility(identifier: edge.rotorID)
+                    .rotorMember(id: edge.rotorID, in: rotors, namespace: rotorNamespace)
+            )
+            .onTapGesture(count: 2) {
+                viewModel.selectedEdgeID = (viewModel.selectedEdgeID == edge.id) ? nil : edge.id
+                sidebarTab = .inspector
+                showSidebar = true
+            }
+            .onTapGesture(count: 1) {
+                viewModel.selectedEdgeID = (viewModel.selectedEdgeID == edge.id) ? nil : edge.id
+            }
+        }
+    }
+
+    private var nodeNames: [String: String] {
+        Dictionary(viewModel.nodes.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    private func showDetails(forNode id: String) {
+        viewModel.selectNode(id, extending: false)
+        sidebarTab = .inspector
+        showSidebar = true
+    }
+
+    /// Matches the identifier each node view sets on itself, which `children: .ignore` would drop.
+    private func accessibilityIdentifier(for node: FreeformDiagram.Node) -> String {
+        switch node.content {
+        case .type:
+            "diagram.typeNode.\(node.name)"
+        case .state:
+            "diagram.stateNode.\(node.name)"
+        case .lifeline:
+            "diagram.sequenceParticipant.\(node.name)"
+        case .package, .boundary, .subsystem:
+            "diagram.containerNode.\(node.name)"
+        default:
+            "diagram.freeformNode.\(node.id)"
+        }
+    }
+
+    private func nodeAccessibility(
+        _ view: some View, for node: FreeformDiagram.Node, rotors: DiagramRotorPlan
+    ) -> some View {
+        view.diagramNodeAccessibility(
+            DiagramElementDescription(freeformNode: node),
+            identifier: accessibilityIdentifier(for: node),
+            isSelected: viewModel.selectedNodeIDs.contains(node.id),
+            onSelect: { viewModel.selectNode(node.id, extending: false) },
+            onShowDetails: { showDetails(forNode: node.id) }
+        )
+        .diagramRotorMember(id: node.id, in: rotors, namespace: rotorNamespace)
+    }
+
+    // MARK: - Container Node Layer (lowest z-level)
+
+    func containerNodeLayer(rotors: DiagramRotorPlan) -> some View {
+        ForEach(viewModel.containerLayerNodes) { node in
+            nodeView(for: node, rotors: rotors)
+        }
+    }
+
+    // MARK: - Regular Node Layer (highest z-level)
+
+    func regularNodeLayer(rotors: DiagramRotorPlan) -> some View {
+        ForEach(viewModel.regularLayerNodes) { node in
+            nodeView(for: node, rotors: rotors)
+        }
+    }
+
+    // MARK: - Sequence Layer (lifelines + ordered messages)
+
+    /// Renders the diagram's sequence elements — lifelines, execution bars and time-ordered
+    /// message arrows — through the same `SequenceLayoutModel` / `SequenceEnsembleView` the
+    /// generated sequence view uses, so freeform sequence diagrams look identical to generated
+    /// ones. Headers stay interactive freeform nodes (select, drag, context menu); messages get
+    /// tap targets that select their backing edge for the inspector.
+    @ViewBuilder
+    func sequenceLayer(_ sequenceLayout: SequenceLayoutModel?, rotors: DiagramRotorPlan) -> some View {
+        if let layout = sequenceLayout {
+            let anchorY = viewModel.sequence.sequenceAnchorY
+            // Resolve the backing edges once: layout message ids index this array (see
+            // `messageEdges`), so the tap targets don't each re-filter and re-sort the edges.
+            let messageEdges = viewModel.sequence.messageEdges
+
+            SequenceEnsembleView(layout: layout)
+                .offset(y: anchorY)
+                .allowsHitTesting(false)
+
+            ForEach(layout.messages) { message in
+                messageTapTarget(
+                    message,
+                    edge: messageEdges.indices.contains(message.id) ? messageEdges[message.id] : nil,
+                    anchorY: anchorY,
+                    rotors: rotors
+                )
+            }
+
+            // Fragment frames are drawn by the ensemble; frame ids are the backing node ids.
+            ForEach(layout.fragments) { fragment in
+                if viewModel.selectedNodeIDs.contains(fragment.id) {
+                    SequenceFragmentView(fragment: fragment, isSelected: true)
+                        .offset(y: anchorY)
+                        .allowsHitTesting(false)
+                }
+                fragmentTapTarget(fragment, anchorY: anchorY, rotors: rotors)
+            }
+
+            ForEach(viewModel.sequence.lifelineNodes) { node in
+                lifelineHeader(for: node, anchorY: anchorY, rotors: rotors)
+            }
+        }
+    }
+
+    /// Sized from the layout's `tabRect` plus slack, so the whole tab is always clickable
+    /// however long the operator name.
+    private func fragmentTapTarget(
+        _ fragment: SequenceLayoutModel.FragmentFrame,
+        anchorY: CGFloat,
+        rotors: DiagramRotorPlan
+    ) -> some View {
+        let tab = fragment.tabRect.insetBy(dx: -4, dy: -3)
+        return Rectangle()
+            .fill(Color.clear)
+            .contentShape(Rectangle())
+            #if os(macOS)
+            .cursorOnHover(.pointingHand)
+            #endif
+            .frame(width: tab.width, height: tab.height)
+            .diagramNodeAccessibility(
+                DiagramElementDescription(label: fragment.kind.rawValue, details: [.app("FreeformKind.Fragment")]),
+                identifier: "diagram.freeformNode.\(fragment.id)",
+                isSelected: viewModel.selectedNodeIDs.contains(fragment.id),
+                onSelect: { viewModel.selectNode(fragment.id, extending: false) },
+                onShowDetails: { showDetails(forNode: fragment.id) }
+            )
+            .diagramRotorMember(id: fragment.id, in: rotors, namespace: rotorNamespace)
+            .position(x: tab.midX, y: anchorY + tab.midY)
+            .onTapGesture(count: 2) {
+                showDetails(forNode: fragment.id)
+            }
+            .onTapGesture(count: 1) {
+                #if os(macOS)
+                let extending = NSEvent.modifierFlags.contains(.command)
+                #else
+                let extending = viewModel.isMultiSelectActive
+                #endif
+                viewModel.selectNode(fragment.id, extending: extending)
+            }
+    }
+
+    private func messageTapTarget(
+        _ message: SequenceLayoutModel.MessageLayout,
+        edge: FreeformDiagram.Edge?,
+        anchorY: CGFloat,
+        rotors: DiagramRotorPlan
+    ) -> some View {
+        let width = max(abs(message.toX - message.fromX), 44)
+        let midX = (message.fromX + message.toX) / 2
+        let isSelected = viewModel.selectedEdgeID != nil && edge?.id == viewModel.selectedEdgeID
+        return RoundedRectangle(cornerRadius: 4)
+            .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .strokeBorder(isSelected ? Color.accentColor : Color.clear, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+            #if os(macOS)
+            .cursorOnHover(.pointingHand)
+            #endif
+            // Cover the label above the arrow as well as the arrow itself.
+            .frame(width: width + 16, height: 30)
+            .position(x: midX, y: anchorY + message.y - 4)
+            .accessibilityElement()
+            .accessibilityLabel(Text(.app("DiagramElementDescription.Message")))
+            .accessibilityValue(Text(verbatim: rotors.label(ofConnection: message.freeformRotorID) ?? ""))
+            .accessibilityAddTraits(isSelected ? [.isButton, .isSelected] : .isButton)
+            .accessibilityAction { toggleEdgeSelection(edge) }
+            .accessibilityAction(named: Text(.app("View.DiagramNodeAccessibility.ShowDetails"))) {
+                showDetails(forEdge: edge)
+            }
+            .diagramRotorMember(id: message.freeformRotorID, in: rotors, namespace: rotorNamespace)
+            .onTapGesture(count: 2) {
+                showDetails(forEdge: edge)
+            }
+            .onTapGesture(count: 1) {
+                toggleEdgeSelection(edge)
+            }
+    }
+
+    private func toggleEdgeSelection(_ edge: FreeformDiagram.Edge?) {
+        guard let edge else { return }
+        viewModel.selectedEdgeID = (viewModel.selectedEdgeID == edge.id) ? nil : edge.id
+    }
+
+    private func showDetails(forEdge edge: FreeformDiagram.Edge?) {
+        guard let edge else { return }
+        viewModel.selectedEdgeID = edge.id
+        sidebarTab = .inspector
+        showSidebar = true
+    }
+
+    private func lifelineHeader(
+        for node: FreeformDiagram.Node, anchorY: CGFloat, rotors: DiagramRotorPlan
+    ) -> some View {
+        let kind: SequenceDiagram.Participant.Kind =
+            if case .lifeline(let k) = node.content { k } else { .object }
+        let size = viewModel.nodeSize(node.id)
+        // Snap to the shared header row regardless of the node's stored y.
+        let position = CGPoint(
+            x: node.positionX,
+            y: anchorY + SequenceLayoutModel.headerHeight / 2
+        )
+        let header = ParticipantHeaderView(
+            name: node.name,
+            kind: kind,
+            isSelected: viewModel.selectedNodeIDs.contains(node.id)
+        )
+        .frame(width: size.width, height: size.height)
+        return nodeAccessibility(header, for: node, rotors: rotors)
+        .position(position)
+        .onTapGesture(count: 2) {
+            showDetails(forNode: node.id)
+        }
+        .onTapGesture(count: 1) {
+            #if os(macOS)
+            let extending = NSEvent.modifierFlags.contains(.command)
+            #else
+            let extending = viewModel.isMultiSelectActive
+            #endif
+            viewModel.selectNode(node.id, extending: extending)
+        }
+        .highPriorityGesture(viewModel.nodeDragGesture(
+            id: node.id,
+            dragStartPositions: $dragStartPositions,
+            activeDragCanvasLocation: $activeDragCanvasLocation,
+            onCommit: { viewModel.save() }
+        ))
+        .contextMenu {
+            nodeContextMenu(for: node)
+        }
+    }
+
+    func nodeView(for node: FreeformDiagram.Node, rotors: DiagramRotorPlan) -> some View {
+        let pos = CGPoint(x: node.positionX, y: node.positionY)
+        let size = viewModel.nodeSize(node.id)
+        let selected = viewModel.selectedNodeIDs.contains(node.id)
+
+        return nodeAccessibility(
+            nodeContent(node: node, size: size, isSelected: selected), for: node, rotors: rotors
+        )
+            .position(pos)
+            .onTapGesture(count: 2) {
+                showDetails(forNode: node.id)
+            }
+            .onTapGesture(count: 1) {
+                #if os(macOS)
+                let extending = NSEvent.modifierFlags.contains(.command)
+                #else
+                let extending = viewModel.isMultiSelectActive
+                #endif
+                viewModel.selectNode(node.id, extending: extending)
+            }
+            .highPriorityGesture(viewModel.nodeDragGesture(
+                id: node.id,
+                dragStartPositions: $dragStartPositions,
+                activeDragCanvasLocation: $activeDragCanvasLocation,
+                onCommit: { viewModel.save() }
+            ))
+            .contextMenu {
+                nodeContextMenu(for: node)
+            }
+    }
+
+    @ViewBuilder
+    private func nodeContextMenu(for node: FreeformDiagram.Node) -> some View {
+        Button {
+            showDetails(forNode: node.id)
+        } label: {
+            Label(.app("View.FreeformDiagramView.Edit"), systemImage: "pencil")
+        }
+
+        Divider()
+
+        Button {
+            viewModel.moveNodeHigher(node.id)
+        } label: {
+            Label(.app("View.FreeformDiagramView.MoveHigher"), systemImage: "chevron.up")
+        }
+
+        Button {
+            viewModel.moveNodeLower(node.id)
+        } label: {
+            Label(.app("View.FreeformDiagramView.MoveLower"), systemImage: "chevron.down")
+        }
+
+        Divider()
+
+        Button(role: .destructive) {
+            viewModel.removeNode(node.id)
+        } label: {
+            Label(.app("View.FreeformDiagramView.DeleteMenu"), systemImage: "trash")
+        }
+    }
+
+    @ViewBuilder
+    func nodeContent(node: FreeformDiagram.Node, size: CGSize, isSelected: Bool) -> some View {
+        if node.isResizable {
+            FreeformNodeView(node: node, isSelected: isSelected, size: size)
+                .frame(width: size.width, height: size.height)
+                // Disable hit testing on the outer frame edges so resize handles
+                // in the layer above can receive hover / drag.
+                .contentShape(Rectangle().inset(by: 6))
+        } else if node.width != nil, node.height != nil {
+            // Not a resizable-by-hand kind, but carries an explicit size (e.g. a class-diagram
+            // node's manual resize, carried over by "Save as Freeform" — see
+            // `ClassFreeformConversion.makeNode`). The content was already measured at this
+            // size once, so re-applying it here keeps the converted box's dimensions instead of
+            // silently reverting to auto-measured content size.
+            FreeformNodeView(node: node, isSelected: isSelected, size: nil)
+                .frame(width: size.width, height: size.height)
+        } else {
+            FreeformNodeView(node: node, isSelected: isSelected, size: nil)
+                .measuredNode(id: node.id)
+        }
+    }
+
+    // MARK: - Resize Handle Layer
+
+    @ViewBuilder
+    var resizeHandleLayer: some View {
+        let nodes = viewModel.nodes
+            .filter { $0.isResizable }
+        ForEach(nodes) { node in
+            let pos = CGPoint(x: node.positionX, y: node.positionY)
+            let size = viewModel.nodeSize(node.id)
+            CanvasResizeHandle(
+                id: node.id,
+                model: viewModel,
+                position: pos,
+                size: size,
+                activeResizeState: $activeResizeState,
+                onCommit: { viewModel.save() }
+            )
+        }
+    }
+}

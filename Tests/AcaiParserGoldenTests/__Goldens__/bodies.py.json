@@ -1,0 +1,3149 @@
+{
+  "freestandingFunctions" : [
+
+  ],
+  "globalVariables" : [
+
+  ],
+  "metadata" : {
+    "discoveredRoots" : [
+
+    ],
+    "filePaths" : [
+      "bodies.py"
+    ],
+    "parseDiagnostics" : [
+
+    ],
+    "sourceLanguage" : "python"
+  },
+  "relationships" : [
+
+  ],
+  "schemaVersion" : 2,
+  "types" : [
+    {
+      "accessLevel" : "public",
+      "annotations" : [
+
+      ],
+      "associatedTypes" : [
+
+      ],
+      "enumCases" : [
+
+      ],
+      "genericParameters" : [
+
+      ],
+      "id" : "Sink",
+      "inheritedTypes" : [
+
+      ],
+      "kind" : "class",
+      "location" : {
+        "column" : 1,
+        "endLine" : 9,
+        "filePath" : "bodies.py",
+        "line" : 6
+      },
+      "members" : [
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 9,
+            "filePath" : "bodies.py",
+            "line" : 8
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "write",
+          "parameters" : [
+            {
+              "internalName" : "message",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "str"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        }
+      ],
+      "modifiers" : [
+
+      ],
+      "name" : "Sink",
+      "nestedTypes" : [
+
+      ],
+      "qualifiedName" : "Sink"
+    },
+    {
+      "accessLevel" : "public",
+      "annotations" : [
+
+      ],
+      "associatedTypes" : [
+
+      ],
+      "enumCases" : [
+
+      ],
+      "genericParameters" : [
+
+      ],
+      "id" : "Logger",
+      "inheritedTypes" : [
+
+      ],
+      "kind" : "class",
+      "location" : {
+        "column" : 1,
+        "endLine" : 21,
+        "filePath" : "bodies.py",
+        "line" : 12
+      },
+      "members" : [
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 15,
+            "filePath" : "bodies.py",
+            "line" : 15
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "sink",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Sink"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 15,
+                "filePath" : "bodies.py",
+                "line" : 15
+              },
+              "op" : "assign",
+              "targetName" : "sink",
+              "value" : {
+                "kind" : "expression",
+                "text" : "Sink()"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 21,
+                "endLine" : 15,
+                "filePath" : "bodies.py",
+                "line" : 15
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Sink"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 15,
+                "filePath" : "bodies.py",
+                "line" : 15
+              },
+              "name" : "sink"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "initializer",
+          "location" : {
+            "column" : 5,
+            "endLine" : 15,
+            "filePath" : "bodies.py",
+            "line" : 14
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "__init__",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Sink",
+            "self",
+            "sink"
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 18,
+            "filePath" : "bodies.py",
+            "line" : 17
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "log",
+          "parameters" : [
+            {
+              "internalName" : "message",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "str"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 21,
+            "filePath" : "bodies.py",
+            "line" : 20
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "flush",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        }
+      ],
+      "modifiers" : [
+
+      ],
+      "name" : "Logger",
+      "nestedTypes" : [
+
+      ],
+      "qualifiedName" : "Logger"
+    },
+    {
+      "accessLevel" : "public",
+      "annotations" : [
+
+      ],
+      "associatedTypes" : [
+
+      ],
+      "enumCases" : [
+
+      ],
+      "genericParameters" : [
+
+      ],
+      "id" : "Cache",
+      "inheritedTypes" : [
+
+      ],
+      "kind" : "class",
+      "location" : {
+        "column" : 1,
+        "endLine" : 33,
+        "filePath" : "bodies.py",
+        "line" : 24
+      },
+      "members" : [
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 27,
+            "filePath" : "bodies.py",
+            "line" : 27
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "entries",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 27,
+                "filePath" : "bodies.py",
+                "line" : 27
+              },
+              "op" : "assign",
+              "targetName" : "entries",
+              "value" : {
+                "kind" : "expression",
+                "text" : "{}"
+              }
+            }
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 27,
+                "filePath" : "bodies.py",
+                "line" : 27
+              },
+              "name" : "entries"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "initializer",
+          "location" : {
+            "column" : 5,
+            "endLine" : 27,
+            "filePath" : "bodies.py",
+            "line" : 26
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "__init__",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "entries",
+            "self"
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 30,
+                "filePath" : "bodies.py",
+                "line" : 30
+              },
+              "name" : "entries"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 30,
+            "filePath" : "bodies.py",
+            "line" : 29
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "store",
+          "parameters" : [
+            {
+              "internalName" : "key",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "str"
+              }
+            },
+            {
+              "internalName" : "value",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "str"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "entries",
+            "key",
+            "self",
+            "value"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 21,
+                "endLine" : 33,
+                "filePath" : "bodies.py",
+                "line" : 33
+              },
+              "name" : "entries"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 33,
+            "filePath" : "bodies.py",
+            "line" : 32
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "lookup",
+          "parameters" : [
+            {
+              "internalName" : "key",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "str"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "entries",
+            "get",
+            "key",
+            "self"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : true,
+            "name" : "str"
+          }
+        }
+      ],
+      "modifiers" : [
+
+      ],
+      "name" : "Cache",
+      "nestedTypes" : [
+
+      ],
+      "qualifiedName" : "Cache"
+    },
+    {
+      "accessLevel" : "public",
+      "annotations" : [
+
+      ],
+      "associatedTypes" : [
+
+      ],
+      "enumCases" : [
+
+      ],
+      "genericParameters" : [
+
+      ],
+      "id" : "Repository",
+      "inheritedTypes" : [
+
+      ],
+      "kind" : "class",
+      "location" : {
+        "column" : 1,
+        "endLine" : 42,
+        "filePath" : "bodies.py",
+        "line" : 36
+      },
+      "members" : [
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 16,
+                "endLine" : 39,
+                "filePath" : "bodies.py",
+                "line" : 39
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 39,
+            "filePath" : "bodies.py",
+            "line" : 38
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "make_cache",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Cache"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Cache"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 16,
+                "endLine" : 42,
+                "filePath" : "bodies.py",
+                "line" : 42
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Logger"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 42,
+            "filePath" : "bodies.py",
+            "line" : 41
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "make_logger",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Logger"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Logger"
+          }
+        }
+      ],
+      "modifiers" : [
+
+      ],
+      "name" : "Repository",
+      "nestedTypes" : [
+
+      ],
+      "qualifiedName" : "Repository"
+    },
+    {
+      "accessLevel" : "public",
+      "annotations" : [
+
+      ],
+      "associatedTypes" : [
+
+      ],
+      "enumCases" : [
+
+      ],
+      "genericParameters" : [
+
+      ],
+      "id" : "Service",
+      "inheritedTypes" : [
+
+      ],
+      "kind" : "class",
+      "location" : {
+        "column" : 1,
+        "endLine" : 129,
+        "filePath" : "bodies.py",
+        "line" : 45
+      },
+      "members" : [
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 48,
+            "filePath" : "bodies.py",
+            "line" : 48
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "logger",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 49,
+            "filePath" : "bodies.py",
+            "line" : 49
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "cache",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Cache"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 50,
+            "filePath" : "bodies.py",
+            "line" : 50
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "repository",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Repository"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 51,
+            "filePath" : "bodies.py",
+            "line" : 51
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "counter",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 52,
+            "filePath" : "bodies.py",
+            "line" : 52
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "name",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 53,
+            "filePath" : "bodies.py",
+            "line" : 53
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "enabled",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 54,
+            "filePath" : "bodies.py",
+            "line" : 54
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "ratio",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 55,
+            "filePath" : "bodies.py",
+            "line" : 55
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "nothing",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 48,
+                "filePath" : "bodies.py",
+                "line" : 48
+              },
+              "op" : "assign",
+              "targetName" : "logger",
+              "value" : {
+                "kind" : "expression",
+                "text" : "logger"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 49,
+                "filePath" : "bodies.py",
+                "line" : 49
+              },
+              "op" : "assign",
+              "targetName" : "cache",
+              "value" : {
+                "kind" : "expression",
+                "text" : "Cache()"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 50,
+                "filePath" : "bodies.py",
+                "line" : 50
+              },
+              "op" : "assign",
+              "targetName" : "repository",
+              "value" : {
+                "kind" : "expression",
+                "text" : "Repository()"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 51,
+                "filePath" : "bodies.py",
+                "line" : 51
+              },
+              "op" : "assign",
+              "targetName" : "counter",
+              "value" : {
+                "kind" : "numericLiteral",
+                "text" : "0"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 52,
+                "filePath" : "bodies.py",
+                "line" : 52
+              },
+              "op" : "assign",
+              "targetName" : "name",
+              "value" : {
+                "kind" : "stringLiteral",
+                "text" : "\"service\""
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 53,
+                "filePath" : "bodies.py",
+                "line" : 53
+              },
+              "op" : "assign",
+              "targetName" : "enabled",
+              "value" : {
+                "kind" : "booleanLiteral",
+                "text" : "True"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 54,
+                "filePath" : "bodies.py",
+                "line" : 54
+              },
+              "op" : "assign",
+              "targetName" : "ratio",
+              "value" : {
+                "kind" : "numericLiteral",
+                "text" : "1.5"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 55,
+                "filePath" : "bodies.py",
+                "line" : 55
+              },
+              "op" : "assign",
+              "targetName" : "nothing",
+              "value" : {
+                "kind" : "nilLiteral",
+                "text" : "None"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 22,
+                "endLine" : 49,
+                "filePath" : "bodies.py",
+                "line" : 49
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            },
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 27,
+                "endLine" : 50,
+                "filePath" : "bodies.py",
+                "line" : 50
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Repository"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 48,
+                "filePath" : "bodies.py",
+                "line" : 48
+              },
+              "name" : "logger"
+            },
+            {
+              "location" : {
+                "column" : 23,
+                "endLine" : 48,
+                "filePath" : "bodies.py",
+                "line" : 48
+              },
+              "name" : "logger"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 49,
+                "filePath" : "bodies.py",
+                "line" : 49
+              },
+              "name" : "cache"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 50,
+                "filePath" : "bodies.py",
+                "line" : 50
+              },
+              "name" : "repository"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 51,
+                "filePath" : "bodies.py",
+                "line" : 51
+              },
+              "name" : "counter"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 52,
+                "filePath" : "bodies.py",
+                "line" : 52
+              },
+              "name" : "name"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 53,
+                "filePath" : "bodies.py",
+                "line" : 53
+              },
+              "name" : "enabled"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 54,
+                "filePath" : "bodies.py",
+                "line" : 54
+              },
+              "name" : "ratio"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 55,
+                "filePath" : "bodies.py",
+                "line" : 55
+              },
+              "name" : "nothing"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "initializer",
+          "location" : {
+            "column" : 5,
+            "endLine" : 55,
+            "filePath" : "bodies.py",
+            "line" : 47
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "__init__",
+          "parameters" : [
+            {
+              "internalName" : "logger",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "Logger"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "Cache",
+            "Repository",
+            "cache",
+            "counter",
+            "enabled",
+            "logger",
+            "name",
+            "nothing",
+            "ratio",
+            "repository",
+            "self"
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 60,
+                "filePath" : "bodies.py",
+                "line" : 60
+              },
+              "op" : "assign",
+              "targetName" : "counter",
+              "value" : {
+                "kind" : "expression",
+                "text" : "self.counter + 1"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 61,
+                "filePath" : "bodies.py",
+                "line" : 61
+              },
+              "op" : "compound",
+              "targetName" : "counter",
+              "value" : {
+                "kind" : "expression",
+                "text" : "self.counter += 1"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 62,
+                "filePath" : "bodies.py",
+                "line" : 62
+              },
+              "op" : "assign",
+              "targetName" : "name",
+              "value" : {
+                "kind" : "stringLiteral",
+                "text" : "\"renamed\""
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 63,
+                "filePath" : "bodies.py",
+                "line" : 63
+              },
+              "op" : "assign",
+              "targetName" : "enabled",
+              "value" : {
+                "kind" : "booleanLiteral",
+                "text" : "False"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+                null,
+                null
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 59,
+                "filePath" : "bodies.py",
+                "line" : 59
+              },
+              "methodName" : "store",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 58,
+                "filePath" : "bodies.py",
+                "line" : 58
+              },
+              "name" : "logger"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 59,
+                "filePath" : "bodies.py",
+                "line" : 59
+              },
+              "name" : "cache"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 60,
+                "filePath" : "bodies.py",
+                "line" : 60
+              },
+              "name" : "counter"
+            },
+            {
+              "location" : {
+                "column" : 29,
+                "endLine" : 60,
+                "filePath" : "bodies.py",
+                "line" : 60
+              },
+              "name" : "counter"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 61,
+                "filePath" : "bodies.py",
+                "line" : 61
+              },
+              "name" : "counter"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 62,
+                "filePath" : "bodies.py",
+                "line" : 62
+              },
+              "name" : "name"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 63,
+                "filePath" : "bodies.py",
+                "line" : 63
+              },
+              "name" : "enabled"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 63,
+            "filePath" : "bodies.py",
+            "line" : 57
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_own_properties",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "cache",
+            "counter",
+            "enabled",
+            "log",
+            "logger",
+            "name",
+            "self",
+            "store"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 66,
+                "filePath" : "bodies.py",
+                "line" : 66
+              },
+              "methodName" : "uses_own_properties",
+              "receiver" : {
+                "selfDispatch" : {
+
+                }
+              }
+            },
+            {
+              "arguments" : [
+
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 67,
+                "filePath" : "bodies.py",
+                "line" : 67
+              },
+              "methodName" : "helper",
+              "receiver" : {
+                "selfDispatch" : {
+
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 67,
+            "filePath" : "bodies.py",
+            "line" : 65
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_self_dispatch",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "helper",
+            "self",
+            "uses_own_properties"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 70,
+            "filePath" : "bodies.py",
+            "line" : 69
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "helper",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+                null
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 73,
+                "filePath" : "bodies.py",
+                "line" : 73
+              },
+              "methodName" : "log",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Logger"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 73,
+            "filePath" : "bodies.py",
+            "line" : 72
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_parameter",
+          "parameters" : [
+            {
+              "internalName" : "other",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "Logger"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "log",
+            "other"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+                null
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 76,
+                "filePath" : "bodies.py",
+                "line" : 76
+              },
+              "methodName" : "write",
+              "receiver" : {
+                "propertyChain" : {
+                  "headTypeName" : "Logger",
+                  "hops" : [
+                    "sink"
+                  ]
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 76,
+            "filePath" : "bodies.py",
+            "line" : 75
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_property_chain",
+          "parameters" : [
+            {
+              "internalName" : "other",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "Logger"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "other",
+            "sink",
+            "write"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 79,
+                "filePath" : "bodies.py",
+                "line" : 79
+              },
+              "op" : "assign",
+              "targetName" : "local",
+              "value" : {
+                "kind" : "expression",
+                "text" : "Cache()"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 17,
+                "endLine" : 79,
+                "filePath" : "bodies.py",
+                "line" : 79
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            },
+            {
+              "arguments" : [
+                null,
+                null
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 80,
+                "filePath" : "bodies.py",
+                "line" : 80
+              },
+              "methodName" : "store",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 80,
+            "filePath" : "bodies.py",
+            "line" : 78
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_local_from_construction",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Cache",
+            "local",
+            "store"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 83,
+                "filePath" : "bodies.py",
+                "line" : 83
+              },
+              "op" : "assign",
+              "targetName" : "local",
+              "value" : {
+                "kind" : "expression",
+                "text" : "self.repository.make_logger()"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "location" : {
+                "column" : 25,
+                "endLine" : 83,
+                "filePath" : "bodies.py",
+                "line" : 83
+              },
+              "methodName" : "make_logger",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Repository"
+                }
+              }
+            },
+            {
+              "arguments" : [
+
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 84,
+                "filePath" : "bodies.py",
+                "line" : 84
+              },
+              "methodName" : "flush",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Logger"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 30,
+                "endLine" : 83,
+                "filePath" : "bodies.py",
+                "line" : 83
+              },
+              "name" : "repository"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 84,
+            "filePath" : "bodies.py",
+            "line" : 82
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_local_from_annotation",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Logger",
+            "flush",
+            "local",
+            "make_logger",
+            "repository",
+            "self"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 87,
+                "filePath" : "bodies.py",
+                "line" : 87
+              },
+              "op" : "assign",
+              "targetName" : "produced",
+              "value" : {
+                "kind" : "expression",
+                "text" : "self.make_cache_like()"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "location" : {
+                "column" : 20,
+                "endLine" : 87,
+                "filePath" : "bodies.py",
+                "line" : 87
+              },
+              "methodName" : "make_cache_like",
+              "receiver" : {
+                "selfDispatch" : {
+
+                }
+              }
+            },
+            {
+              "arguments" : [
+                null,
+                null
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 88,
+                "filePath" : "bodies.py",
+                "line" : 88
+              },
+              "methodName" : "store",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 88,
+            "filePath" : "bodies.py",
+            "line" : 86
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_local_from_method_return",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "make_cache_like",
+            "produced",
+            "self",
+            "store"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 16,
+                "endLine" : 91,
+                "filePath" : "bodies.py",
+                "line" : 91
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 91,
+            "filePath" : "bodies.py",
+            "line" : 90
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "make_cache_like",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Cache"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Cache"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 9,
+                "endLine" : 94,
+                "filePath" : "bodies.py",
+                "line" : 94
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            },
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 9,
+                "endLine" : 95,
+                "filePath" : "bodies.py",
+                "line" : 95
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Logger"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 95,
+            "filePath" : "bodies.py",
+            "line" : 93
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_static_call",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Cache",
+            "Logger",
+            "log",
+            "store"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 98,
+            "filePath" : "bodies.py",
+            "line" : 97
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_unknown_receiver",
+          "parameters" : [
+            {
+              "internalName" : "opaque",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ]
+            }
+          ],
+          "referencedTypeNames" : [
+            "opaque",
+            "whatever"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 101,
+                "filePath" : "bodies.py",
+                "line" : 101
+              },
+              "methodName" : "method",
+              "receiver" : {
+                "unresolvedTypeName" : {
+                  "_0" : "Missing"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 101,
+            "filePath" : "bodies.py",
+            "line" : 100
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_external_type",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Missing",
+            "method"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 104,
+                "filePath" : "bodies.py",
+                "line" : 104
+              },
+              "op" : "assign",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "numericLiteral",
+                "text" : "0"
+              }
+            },
+            {
+              "location" : {
+                "column" : 13,
+                "endLine" : 106,
+                "filePath" : "bodies.py",
+                "line" : 106
+              },
+              "op" : "compound",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "expression",
+                "text" : "total += 1"
+              }
+            },
+            {
+              "location" : {
+                "column" : 13,
+                "endLine" : 108,
+                "filePath" : "bodies.py",
+                "line" : 108
+              },
+              "op" : "compound",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "expression",
+                "text" : "total += 2"
+              }
+            },
+            {
+              "location" : {
+                "column" : 13,
+                "endLine" : 110,
+                "filePath" : "bodies.py",
+                "line" : 110
+              },
+              "op" : "compound",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "expression",
+                "text" : "total -= 1"
+              }
+            },
+            {
+              "location" : {
+                "column" : 17,
+                "endLine" : 113,
+                "filePath" : "bodies.py",
+                "line" : 113
+              },
+              "op" : "compound",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "expression",
+                "text" : "total += index"
+              }
+            },
+            {
+              "location" : {
+                "column" : 17,
+                "endLine" : 115,
+                "filePath" : "bodies.py",
+                "line" : 115
+              },
+              "op" : "compound",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "expression",
+                "text" : "total -= 10"
+              }
+            },
+            {
+              "location" : {
+                "column" : 13,
+                "endLine" : 117,
+                "filePath" : "bodies.py",
+                "line" : 117
+              },
+              "op" : "assign",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "expression",
+                "text" : "total // value"
+              }
+            },
+            {
+              "location" : {
+                "column" : 13,
+                "endLine" : 119,
+                "filePath" : "bodies.py",
+                "line" : 119
+              },
+              "op" : "assign",
+              "targetName" : "total",
+              "value" : {
+                "kind" : "numericLiteral",
+                "text" : "0"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+                null
+              ],
+              "location" : {
+                "column" : 22,
+                "endLine" : 111,
+                "filePath" : "bodies.py",
+                "line" : 111
+              },
+              "methodName" : "range",
+              "receiver" : {
+                "free" : {
+
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 7,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 120,
+            "filePath" : "bodies.py",
+            "line" : 103
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "branching",
+          "parameters" : [
+            {
+              "internalName" : "value",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "int"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "ZeroDivisionError",
+            "index",
+            "range",
+            "total",
+            "value"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "int"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+                null
+              ],
+              "location" : {
+                "column" : 17,
+                "endLine" : 123,
+                "filePath" : "bodies.py",
+                "line" : 123
+              },
+              "methodName" : "transform",
+              "receiver" : {
+                "selfDispatch" : {
+
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 123,
+            "filePath" : "bodies.py",
+            "line" : 122
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "comprehension",
+          "parameters" : [
+            {
+              "internalName" : "values",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ],
+              "type" : {
+                "genericArguments" : [
+
+                ],
+                "isArray" : false,
+                "isOptional" : false,
+                "name" : "list"
+              }
+            }
+          ],
+          "referencedTypeNames" : [
+            "item",
+            "self",
+            "transform",
+            "values"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "list"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 126,
+            "filePath" : "bodies.py",
+            "line" : 125
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "transform",
+          "parameters" : [
+            {
+              "internalName" : "item",
+              "isVariadic" : false,
+              "modifiers" : [
+
+              ]
+            }
+          ],
+          "referencedTypeNames" : [
+            "item"
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 24,
+                "endLine" : 129,
+                "filePath" : "bodies.py",
+                "line" : 129
+              },
+              "name" : "name"
+            },
+            {
+              "location" : {
+                "column" : 36,
+                "endLine" : 129,
+                "filePath" : "bodies.py",
+                "line" : 129
+              },
+              "name" : "counter"
+            },
+            {
+              "location" : {
+                "column" : 51,
+                "endLine" : 129,
+                "filePath" : "bodies.py",
+                "line" : 129
+              },
+              "name" : "ratio"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 129,
+            "filePath" : "bodies.py",
+            "line" : 128
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "reads_fields",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "counter",
+            "name",
+            "ratio",
+            "self"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "str"
+          }
+        }
+      ],
+      "modifiers" : [
+
+      ],
+      "name" : "Service",
+      "nestedTypes" : [
+
+      ],
+      "qualifiedName" : "Service"
+    },
+    {
+      "accessLevel" : "public",
+      "annotations" : [
+
+      ],
+      "associatedTypes" : [
+
+      ],
+      "enumCases" : [
+
+      ],
+      "genericParameters" : [
+
+      ],
+      "id" : "Untyped",
+      "inheritedTypes" : [
+
+      ],
+      "kind" : "class",
+      "location" : {
+        "column" : 1,
+        "endLine" : 139,
+        "filePath" : "bodies.py",
+        "line" : 132
+      },
+      "members" : [
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 135,
+            "filePath" : "bodies.py",
+            "line" : 135
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "inferred",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "Cache"
+          }
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+
+          ],
+          "fieldReads" : [
+
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "property",
+          "location" : {
+            "column" : 9,
+            "endLine" : 136,
+            "filePath" : "bodies.py",
+            "line" : 136
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "plain",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 135,
+                "filePath" : "bodies.py",
+                "line" : 135
+              },
+              "op" : "assign",
+              "targetName" : "inferred",
+              "value" : {
+                "kind" : "expression",
+                "text" : "Cache()"
+              }
+            },
+            {
+              "location" : {
+                "column" : 9,
+                "endLine" : 136,
+                "filePath" : "bodies.py",
+                "line" : 136
+              },
+              "op" : "assign",
+              "targetName" : "plain",
+              "value" : {
+                "kind" : "numericLiteral",
+                "text" : "1"
+              }
+            }
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+
+              ],
+              "isConstruction" : true,
+              "location" : {
+                "column" : 25,
+                "endLine" : 135,
+                "filePath" : "bodies.py",
+                "line" : 135
+              },
+              "methodName" : "__init__",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 135,
+                "filePath" : "bodies.py",
+                "line" : 135
+              },
+              "name" : "inferred"
+            },
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 136,
+                "filePath" : "bodies.py",
+                "line" : 136
+              },
+              "name" : "plain"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "initializer",
+          "location" : {
+            "column" : 5,
+            "endLine" : 136,
+            "filePath" : "bodies.py",
+            "line" : 134
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "__init__",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "Cache",
+            "inferred",
+            "plain",
+            "self"
+          ]
+        },
+        {
+          "accessLevel" : "public",
+          "annotations" : [
+
+          ],
+          "assignments" : [
+
+          ],
+          "callSites" : [
+            {
+              "arguments" : [
+                null,
+                null
+              ],
+              "location" : {
+                "column" : 9,
+                "endLine" : 139,
+                "filePath" : "bodies.py",
+                "line" : 139
+              },
+              "methodName" : "store",
+              "receiver" : {
+                "type" : {
+                  "_0" : "Cache"
+                }
+              }
+            }
+          ],
+          "cyclomaticComplexity" : 1,
+          "fieldReads" : [
+            {
+              "location" : {
+                "column" : 14,
+                "endLine" : 139,
+                "filePath" : "bodies.py",
+                "line" : 139
+              },
+              "name" : "inferred"
+            }
+          ],
+          "genericParameters" : [
+
+          ],
+          "isComputed" : false,
+          "kind" : "method",
+          "location" : {
+            "column" : 5,
+            "endLine" : 139,
+            "filePath" : "bodies.py",
+            "line" : 138
+          },
+          "modifiers" : [
+
+          ],
+          "name" : "uses_inferred",
+          "parameters" : [
+
+          ],
+          "referencedTypeNames" : [
+            "inferred",
+            "self",
+            "store"
+          ],
+          "type" : {
+            "genericArguments" : [
+
+            ],
+            "isArray" : false,
+            "isOptional" : false,
+            "name" : "None"
+          }
+        }
+      ],
+      "modifiers" : [
+
+      ],
+      "name" : "Untyped",
+      "nestedTypes" : [
+
+      ],
+      "qualifiedName" : "Untyped"
+    }
+  ]
+}

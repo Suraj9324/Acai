@@ -1,0 +1,281 @@
+public struct CodeArtifact: Codable, Equatable, Hashable, Sendable {
+    /// The shape this build writes. Bump on any change a reader could misinterpret (a field made
+    /// optional, a meaning changed under the same name, a new enum case an older reader defaults).
+    public static let currentSchemaVersion = 2
+
+    /// Which shape this artifact follows — not `metadata.toolVersion`, which says which binary wrote
+    /// it: two tool versions can share a schema. Missing on disk (written before this field existed)
+    /// decodes as `0`, which every reader accepts.
+    public var schemaVersion: Int
+    public var metadata: Metadata
+    public var types: [TypeDeclaration]
+    public var relationships: [Relationship]
+    public var freestandingFunctions: [Member]
+    /// Top-level (module-scope) `let`/`var` declarations.
+    public var globalVariables: [Member]
+
+    public init(
+        metadata: Metadata,
+        types: [TypeDeclaration] = [],
+        relationships: [Relationship] = [],
+        freestandingFunctions: [Member] = [],
+        globalVariables: [Member] = []
+    ) {
+        self.schemaVersion = Self.currentSchemaVersion
+        self.metadata = metadata
+        self.types = types
+        self.relationships = relationships
+        self.freestandingFunctions = freestandingFunctions
+        self.globalVariables = globalVariables
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, metadata, types, relationships, freestandingFunctions, globalVariables
+    }
+
+    public init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 0
+        self.metadata = try container.decode(Metadata.self, forKey: .metadata)
+        self.types = try container.decode([TypeDeclaration].self, forKey: .types)
+        self.relationships = try container.decode([Relationship].self, forKey: .relationships)
+        self.freestandingFunctions = try container.decode([Member].self, forKey: .freestandingFunctions)
+        self.globalVariables = try container.decode([Member].self, forKey: .globalVariables)
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(metadata, forKey: .metadata)
+        try container.encode(types, forKey: .types)
+        try container.encode(relationships, forKey: .relationships)
+        try container.encode(freestandingFunctions, forKey: .freestandingFunctions)
+        try container.encode(globalVariables, forKey: .globalVariables)
+    }
+
+    public struct Metadata: Codable, Equatable, Hashable, Sendable {
+        public var sourceLanguage: SourceLanguage
+        public var filePaths: [String]
+        public var toolVersion: String?
+        /// Empty when every source file parsed cleanly.
+        public var parseDiagnostics: [ParseDiagnostic]
+        /// The project roots discovery claimed, in the order it found them. Empty when the artifact
+        /// came straight from a parser, which does no discovery of its own.
+        public var discoveredRoots: [DiscoveredRoot]
+
+        /// `true` when at least one source file could not be fully parsed
+        /// (the best-effort tree contained missing/unexpected nodes).
+        public var hasParseErrors: Bool { !parseDiagnostics.isEmpty }
+
+        public init(
+            sourceLanguage: SourceLanguage,
+            filePaths: [String] = [],
+            toolVersion: String? = nil,
+            parseDiagnostics: [ParseDiagnostic] = [],
+            discoveredRoots: [DiscoveredRoot] = []
+        ) {
+            self.sourceLanguage = sourceLanguage
+            self.filePaths = filePaths
+            self.toolVersion = toolVersion
+            self.parseDiagnostics = parseDiagnostics
+            self.discoveredRoots = discoveredRoots
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case sourceLanguage, filePaths, toolVersion, parseDiagnostics, discoveredRoots
+        }
+
+        /// Hand-written only for `discoveredRoots`: a plain synthesized decoder requires every key,
+        /// which would reject every artifact written before this field existed. `encode(to:)` stays
+        /// synthesized from the same `CodingKeys`, so it still always writes the key (see
+        /// `emptyDiscoveredRootsStillEncodesTheKey`) — only decoding needs the fallback.
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.sourceLanguage = try container.decode(SourceLanguage.self, forKey: .sourceLanguage)
+            self.filePaths = try container.decode([String].self, forKey: .filePaths)
+            self.toolVersion = try container.decodeIfPresent(String.self, forKey: .toolVersion)
+            self.parseDiagnostics = try container.decode([ParseDiagnostic].self, forKey: .parseDiagnostics)
+            self.discoveredRoots =
+                try container.decodeIfPresent([DiscoveredRoot].self, forKey: .discoveredRoots) ?? []
+        }
+    }
+
+    /// A project root discovery claimed: where it sits, which detector claimed it, and the languages
+    /// it accounted for. Recorded so a consumer can attribute a type to the project it came from
+    /// rather than inferring one from a path anchor.
+    public struct DiscoveredRoot: Codable, Equatable, Hashable, Sendable {
+        /// Relative to the analysed folder; `"."` when the folder is itself the root.
+        public var path: String
+        /// The claiming detector's type name.
+        public var detector: String
+        public var languages: [SourceLanguage]
+        /// Relative to the analysed folder, across every language this root claimed.
+        public var sourceDirs: [String]
+        /// Matched by file extension because no build system claimed these languages.
+        public var isFallback: Bool
+
+        public init(
+            path: String,
+            detector: String,
+            languages: [SourceLanguage],
+            sourceDirs: [String] = [],
+            isFallback: Bool = false
+        ) {
+            self.path = path
+            self.detector = detector
+            self.languages = languages
+            self.sourceDirs = sourceDirs
+            self.isFallback = isFallback
+        }
+    }
+
+    /// An open identifier for a source language.
+    ///
+    /// Deliberately a `RawRepresentable` struct rather than an enum: the built-in constants
+    /// (`.swift`, `.dart`, …) are defined in their respective language targets, never here, so an
+    /// agnostic target cannot name a specific language and an external consumer can introduce a new
+    /// one with `SourceLanguage(rawValue:)`.
+    public struct SourceLanguage: RawRepresentable, Codable, Equatable, Hashable, Sendable {
+        public let rawValue: String
+
+        public init(rawValue: String) {
+            self.rawValue = rawValue
+        }
+
+        public init(from decoder: any Decoder) throws {
+            let container = try decoder.singleValueContainer()
+            self.rawValue = try container.decode(String.self)
+        }
+
+        public func encode(to encoder: any Encoder) throws {
+            var container = encoder.singleValueContainer()
+            try container.encode(rawValue)
+        }
+    }
+}
+
+extension CodeArtifact {
+    /// Applied per language group during enrichment so each type in a merged polyglot artifact
+    /// records where it came from.
+    public func stampingSourceLanguage(_ language: SourceLanguage) -> CodeArtifact {
+        var copy = self
+        copy.types = types.map { $0.stampingSourceLanguage(language) }
+        return copy
+    }
+
+    public func merging(with other: CodeArtifact) -> CodeArtifact {
+        CodeArtifact(merging: [self, other]) ?? self
+    }
+
+    /// The number of array elements a merge of this artifact copies.
+    public var elementCount: Int {
+        metadata.filePaths.count + metadata.parseDiagnostics.count + metadata.discoveredRoots.count
+            + types.count + relationships.count + freestandingFunctions.count + globalVariables.count
+    }
+
+    /// Concatenates in one pass; `nil` for no fragments, and a single fragment is adopted without copying.
+    public init?(merging fragments: [CodeArtifact], countingInto counter: MergeElementCounter? = nil) {
+        guard let first = fragments.first else { return nil }
+        guard fragments.count > 1 else {
+            self = first
+            return
+        }
+
+        var accumulated = Accumulator(reservingFor: fragments)
+        for fragment in fragments {
+            accumulated.append(fragment)
+        }
+        counter?.record(accumulated.elementsCopied)
+
+        self.init(
+            metadata: Metadata(
+                sourceLanguage: first.metadata.sourceLanguage,
+                filePaths: accumulated.filePaths,
+                toolVersion: fragments.lazy.compactMap(\.metadata.toolVersion).first,
+                parseDiagnostics: accumulated.parseDiagnostics,
+                discoveredRoots: accumulated.discoveredRoots.removingDuplicates { $0 }
+            ),
+            types: accumulated.types,
+            relationships: accumulated.relationships,
+            freestandingFunctions: accumulated.freestandingFunctions,
+            globalVariables: accumulated.globalVariables
+        )
+    }
+
+    private struct Accumulator {
+        var filePaths: [String] = []
+        var parseDiagnostics: [ParseDiagnostic] = []
+        var discoveredRoots: [DiscoveredRoot] = []
+        var types: [TypeDeclaration] = []
+        var relationships: [Relationship] = []
+        var freestandingFunctions: [Member] = []
+        var globalVariables: [Member] = []
+        private(set) var elementsCopied = 0
+
+        init(reservingFor fragments: [CodeArtifact]) {
+            filePaths.reserveCapacity(fragments.reduce(0) { $0 + $1.metadata.filePaths.count })
+            parseDiagnostics.reserveCapacity(fragments.reduce(0) { $0 + $1.metadata.parseDiagnostics.count })
+            discoveredRoots.reserveCapacity(fragments.reduce(0) { $0 + $1.metadata.discoveredRoots.count })
+            types.reserveCapacity(fragments.reduce(0) { $0 + $1.types.count })
+            relationships.reserveCapacity(fragments.reduce(0) { $0 + $1.relationships.count })
+            freestandingFunctions.reserveCapacity(fragments.reduce(0) { $0 + $1.freestandingFunctions.count })
+            globalVariables.reserveCapacity(fragments.reduce(0) { $0 + $1.globalVariables.count })
+        }
+
+        mutating func append(_ fragment: CodeArtifact) {
+            filePaths.append(contentsOf: fragment.metadata.filePaths)
+            parseDiagnostics.append(contentsOf: fragment.metadata.parseDiagnostics)
+            discoveredRoots.append(contentsOf: fragment.metadata.discoveredRoots)
+            types.append(contentsOf: fragment.types)
+            relationships.append(contentsOf: fragment.relationships)
+            freestandingFunctions.append(contentsOf: fragment.freestandingFunctions)
+            globalVariables.append(contentsOf: fragment.globalVariables)
+            elementsCopied += fragment.elementCount
+        }
+    }
+
+    public func resolvingExtensions() -> CodeArtifact {
+        resolvingExtensions(counting: nil)
+    }
+
+    // MARK: - Generated-Code Filtering
+
+    /// `resolver` supplies each type's `GeneratedCodeFilter` from its own language, so a polyglot
+    /// artifact filters each language's generated files under that language's rules rather than one
+    /// dominant filter.
+    public func filteringGeneratedTypes(using resolver: LanguageConfigurationResolver) -> CodeArtifact {
+        let removedIDs: Set<String> = Set(
+            types.filter { type in
+                guard let filter = resolver.configuration(for: type).generatedCodeFilter else { return false }
+                if let path = type.location?.filePath, filter.matchesFile(path) {
+                    return true
+                }
+                return filter.matchesTypeName(type.name)
+            }.map(\.id)
+        )
+
+        let removedNames: Set<String> = Set(
+            types.filter { removedIDs.contains($0.id) }.map(\.name)
+        )
+
+        let filteredTypes = types.filter { !removedIDs.contains($0.id) }
+
+        // Edges to a removed type may still reference it by *name* (e.g. an unresolved external
+        // type). Remove those by name too — but only for names no surviving type claims, so a
+        // generated type doesn't take down a legitimately-kept type that shares its simple name.
+        let survivingNames = Set(filteredTypes.map(\.name))
+        let removedOnlyNames = removedNames.subtracting(survivingNames)
+        let filteredRelationships = relationships.filter { rel in
+            !removedIDs.contains(rel.source) && !removedIDs.contains(rel.target)
+                && !removedOnlyNames.contains(rel.source) && !removedOnlyNames.contains(rel.target)
+        }
+
+        return CodeArtifact(
+            metadata: metadata,
+            types: filteredTypes,
+            relationships: filteredRelationships,
+            freestandingFunctions: freestandingFunctions,
+            globalVariables: globalVariables
+        )
+    }
+}

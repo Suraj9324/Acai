@@ -1,0 +1,278 @@
+import SwiftUI
+import AcaiQuality
+
+/// The project-level Findings view: every quality violation, dead-code candidate, and
+/// health-check parse diagnostic across every codebase in the project, aggregated into one
+/// sortable (severity first, then recency), filterable (kind, codebase) list.
+///
+/// Every row is a `CodeElementReference`, so it gets the full "Open in…"/View Source treatment
+/// for free, plus a "Suppress" action writing to a project-level baseline file.
+struct FindingsView: View {
+    let projectID: UUID
+
+    @EnvironmentObject private var model: ProjectBrowserViewModel
+
+    @StateObject private var blame = FindingsBlameViewModel()
+    @State var list = FindingsListState()
+    @State private var isLoadingSuppression = true
+    @State private var suppressionError: String?
+    @State private var suppressionSavePhase: AsyncOperationPhase = .idle
+    @State private var authorshipAttempt = 0
+    @State private var fullHistoryPhases: [URL: AsyncOperationPhase] = [:]
+
+    private var project: Project? {
+        model.store.projects.first { $0.id == projectID }
+    }
+
+    var body: some View {
+        Group {
+            if let project {
+                content(project: project)
+            } else {
+                Text(.app("View.FindingsView.ProjectNotFound"))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityIdentifier("findings.projectNotFoundState")
+            }
+        }
+        .navigationTitle(.app("View.FindingsView.Findings"))
+        .task(id: projectID) {
+            await loadSuppression()
+        }
+        .task(id: projectID) {
+            requestAnalyses()
+        }
+        .alert(
+            .app("View.FindingsView.CouldNotSaveSuppression"),
+            isPresented: Binding(get: { suppressionError != nil }, set: { if !$0 { suppressionError = nil } })
+        ) {
+            Button(.app("View.FindingsView.OK"), role: .cancel) { suppressionError = nil }
+        } message: {
+            Text(verbatim: suppressionError ?? "")
+        }
+    }
+
+    @ViewBuilder
+    private func content(project: Project) -> some View {
+        if project.codebases.isEmpty {
+            ActionableEmptyState(
+                text: .app("View.FindingsView.NoCodebasesYet"), systemImage: "checkmark.seal",
+                identifier: "findings.noCodebasesState")
+        } else {
+            let aggregator = FindingsAggregator(project: project, model: model)
+            let notIndexed = aggregator.codebasesNotIndexed()
+            if notIndexed.count == project.codebases.count {
+                ActionableEmptyState(
+                    text: .app("View.FindingsView.NoCodebaseIndexedYet"), systemImage: "checkmark.seal",
+                    identifier: "findings.notIndexedState")
+            } else {
+                let allFindings = aggregator.findings()
+                let stillAnalyzing = aggregator.codebasesStillAnalyzing()
+                if allFindings.isEmpty && !stillAnalyzing.isEmpty {
+                    loadingState(count: stillAnalyzing.count)
+                } else {
+                    listContent(
+                        project: project, allFindings: allFindings,
+                        stillAnalyzing: stillAnalyzing, notIndexed: notIndexed)
+                }
+            }
+        }
+    }
+
+    private func loadingState(count: Int) -> some View {
+        VStack(spacing: .spacingM) {
+            ProgressView()
+            Text(.app("View.FindingsView.AnalyzingCodebaseS \(count)"))
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("findings.loadingState")
+    }
+
+    // MARK: - List
+
+    @ViewBuilder
+    private func listContent(
+        project: Project, allFindings: [Finding], stillAnalyzing: [Codebase], notIndexed: [Codebase]
+    ) -> some View {
+        let visible = list.visible(from: allFindings)
+        VStack(alignment: .leading, spacing: .zero) {
+            filterBar(project: project)
+            AsyncOperationStatusView(identifierPrefix: "findings.suppressionSave", phase: suppressionSavePhase)
+            authorshipStatus(project: project)
+            if !stillAnalyzing.isEmpty || !notIndexed.isEmpty {
+                statusNote(stillAnalyzing: stillAnalyzing, notIndexed: notIndexed)
+            }
+            Divider()
+            if visible.isEmpty {
+                ActionableEmptyState(
+                    text: allFindings.isEmpty
+                        ? .app("View.FindingsView.NoFindingsClean")
+                        : .app("View.FindingsView.NoFindingsMatchFilters"),
+                    systemImage: "checkmark.seal",
+                    identifier: "findings.emptyState"
+                ) {
+                    if !allFindings.isEmpty, list.hasActiveFilters { clearFiltersButton }
+                }
+            } else {
+                List(visible) { finding in
+                    FindingRow(
+                        finding: finding,
+                        codebase: model.codebase(for: finding.codebaseID),
+                        isSuppressed: list.isSuppressed(finding),
+                        // `nil` while the baseline is still loading — hides the action rather than
+                        // risking a suppress/un-suppress tap racing the in-flight load and having
+                        // its result silently overwritten once that load completes.
+                        onToggleSuppressed: isLoadingSuppression ? nil : { toggleSuppressed(finding) },
+                        onOpenCycle: { openCycle(finding) },
+                        lastTouched: blame.lastTouchedByFindingID[finding.id]
+                    )
+                    .listRowSeparator(.hidden)
+                }
+                .accessibilityIdentifier("findings.list")
+                #if os(iOS)
+                .listStyle(.plain)
+                #endif
+            }
+        }
+        .task(id: AuthorshipLoad(findingIDs: allFindings.map(\.id), attempt: authorshipAttempt)) {
+            await blame.load(
+                findings: allFindings,
+                codebases: Dictionary(uniqueKeysWithValues: project.codebases.map { ($0.id, $0) }),
+                gitRepositoriesDir: model.store.gitRepositoriesDir)
+        }
+    }
+
+    private struct AuthorshipLoad: Equatable {
+        let findingIDs: [String]
+        let attempt: Int
+    }
+
+    private func reloadAuthorship() {
+        blame.invalidate()
+        authorshipAttempt += 1
+    }
+
+    @ViewBuilder
+    private func authorshipStatus(project: Project) -> some View {
+        HStack(spacing: .spacingS) {
+            AsyncOperationStatusView(identifierPrefix: "findings.authorship", phase: blame.phase)
+            if case .failed = blame.phase {
+                Button(action: reloadAuthorship) {
+                    Label(.app("View.FindingsView.RetryAuthorship"), systemImage: "arrow.clockwise")
+                }
+                .font(.caption)
+                .accessibilityIdentifier("findings.authorship.retryButton")
+                .contextMenu {
+                    Button(action: reloadAuthorship) {
+                        Label(.app("View.FindingsView.RetryAuthorship"), systemImage: "arrow.clockwise")
+                    }
+                }
+            }
+        }
+        .padding(.horizontal)
+        let shallow = project.codebases.filter { blame.historyNotFetchedCodebaseIDs.contains($0.id) }
+        if !shallow.isEmpty {
+            authorshipNeedsFullHistoryBanner(shallow)
+        }
+    }
+
+    /// Only an app-managed clone offers to fetch more: deepening a local folder's own repository
+    /// would change the user's checkout, which the app never does.
+    private func authorshipNeedsFullHistoryBanner(_ shallow: [Codebase]) -> some View {
+        let remoteURLs = Set(shallow.compactMap { $0.managedCheckout != nil ? $0.repository?.remoteURL : nil })
+        return VStack(alignment: .leading, spacing: .spacingXS) {
+            Label(
+                .app("View.FindingsView.AuthorshipNeedsFullHistory \(shallow.count)"),
+                systemImage: "clock.badge.exclamationmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(remoteURLs.sorted { $0.absoluteString < $1.absoluteString }, id: \.self) { remoteURL in
+                FetchFullHistoryButton(
+                    remoteURL: remoteURL,
+                    phase: Binding(
+                        get: { fullHistoryPhases[remoteURL] ?? .idle },
+                        set: { fullHistoryPhases[remoteURL] = $0 }),
+                    identifierPrefix: "findings.fullHistory",
+                    onFetched: reloadAuthorship)
+                .font(.caption)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, .spacingXS)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("findings.authorshipNeedsFullHistory")
+    }
+
+    private func statusNote(stillAnalyzing: [Codebase], notIndexed: [Codebase]) -> some View {
+        VStack(alignment: .leading, spacing: .spacingXS) {
+            if !stillAnalyzing.isEmpty {
+                HStack(spacing: .spacingXS) {
+                    ProgressView().controlSize(.small)
+                    Text(.app("View.FindingsView.StillAnalyzingMoreCodebase \(stillAnalyzing.count)"))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+            if !notIndexed.isEmpty {
+                Text(.app("View.FindingsView.CodebaseSNotIndexed \(notIndexed.count)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal)
+        .padding(.vertical, .spacingXS)
+    }
+
+    // MARK: - Loading analyses / suppression
+
+    /// `ProjectBrowserViewModel.analyses` is `@Published`, so the view refreshes progressively as
+    /// each codebase's analysis completes rather than blocking on all of them together.
+    private func requestAnalyses() {
+        guard let project else { return }
+        for codebase in project.codebases {
+            Task { await model.ensureAnalysisLoaded(codebaseID: codebase.id) }
+        }
+    }
+
+    private func loadSuppression() async {
+        isLoadingSuppression = true
+        let baseDir = model.store.baseDir
+        let projectID = projectID
+        list.baseline = await Task.detached(priority: .userInitiated) {
+            FindingsSuppressionStore(baseDir: baseDir).load(projectID: projectID)
+        }.value
+        isLoadingSuppression = false
+    }
+
+    /// Opens a `cycle`-kind finding as a class/package diagram scoped to exactly its members, the
+    /// same action `ViolationRowView` offers on the Quality Check section's own cycle rows.
+    private func openCycle(_ finding: Finding) {
+        guard let cycle = finding.cycle, let scope = CycleFinder.Scope(rawValue: cycle.scope) else { return }
+        if let id = model.diagrams.openCycle(
+            to: projectID, codebaseID: finding.codebaseID, scope: scope, members: cycle.members
+        ) {
+            model.open(.generatedDiagram(id))
+        }
+    }
+
+    private func toggleSuppressed(_ finding: Finding) {
+        list = list.toggling(finding)  // optimistic: the row's state flips immediately
+        let baseDir = model.store.baseDir
+        let projectID = projectID
+        let toSave = list.baseline
+        suppressionSavePhase = .loading(.app("View.FindingsView.Saving"))
+        Task {
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try FindingsSuppressionStore(baseDir: baseDir).save(toSave, projectID: projectID)
+                }.value
+                suppressionSavePhase = .loaded
+            } catch {
+                suppressionError = error.localizedDescription
+                suppressionSavePhase = .failed(error.localizedDescription)
+            }
+        }
+    }
+}

@@ -1,0 +1,175 @@
+import ArgumentParser
+import Foundation
+import AcaiCore
+import AcaiDiagram
+import AcaiDiff
+import AcaiLibrary
+
+extension AcaiCommand {
+    struct Diff: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Show the structural delta between two revisions of a codebase",
+            discussion: """
+            Compares an OLD and a NEW artifact and reports only what structurally changed — added/\
+            removed types, added/removed/changed relationships, and notable metric movement.
+
+            Each side is either a stored analysis name / .json path (positional), or a source \
+            directory to analyze on the fly (--source-old / --source-new):
+
+              acai diff main-baseline HEAD-analysis
+              acai diff old.json new.json
+              acai diff main-baseline --source-new ./
+            """
+        )
+
+        @Argument(help: "Old side: a stored analysis name or a path to a .json file.")
+        var old: String?
+
+        @Argument(help: "New side: a stored analysis name or a path to a .json file.")
+        var new: String?
+
+        @Option(name: .long, help: "Analyze this source directory as the OLD side instead of a stored artifact.")
+        var sourceOld: String?
+
+        @Option(name: .long, help: "Analyze this source directory as the NEW side instead of a stored artifact.")
+        var sourceNew: String?
+
+        @Option(name: .long, help: ArgumentHelp(
+            "Limit on-the-fly analysis to one or more languages (\(LanguageNameCatalog.standard.namesList))."
+        ))
+        var language: [LanguageOption] = []
+
+        @OptionGroup var generatedScope: GeneratedScopeOption
+
+        @Option(name: .long, help: "Report format: human or json.")
+        var format: ReportFormatOption = .human
+
+        @Option(name: .long, help: ArgumentHelp(
+            "Render a delta diagram (dot or mermaid) with added/removed/changed elements colour-coded,"
+            + " instead of a textual report. Defaults to a class diagram; combine with one of"
+            + " --sequence-from / --state-from / --package / --module-coupling / --call-graph for the"
+            + " other diagram types."
+        ))
+        var diagram: FormatOption?
+
+        @Option(name: .long, help: "Delta a sequence diagram traced from this entry point (\"Type.method\").")
+        var sequenceFrom: String?
+
+        @Option(name: .long, help: "Maximum sequence-diagram call-graph depth.")
+        var maxDepth: Int = 5
+
+        @Option(name: .long, help: "Delta a value-flow state diagram for this variable (\"Type.variable\").")
+        var stateFrom: String?
+
+        @Option(name: .long, help: "Maximum number of distinct states before the analysis fails.")
+        var maxStates: Int = 20
+
+        @Flag(name: .long, help: "Delta a package/module dependency diagram.")
+        var package = false
+
+        @Flag(name: .long, help: "Delta the module coupling view (Ca/Ce/I/A/D plus main-sequence zone).")
+        var moduleCoupling = false
+
+        @Flag(name: .long, help: "Delta a static call graph.")
+        var callGraph = false
+
+        @Option(name: .long, help: "Scope the call-graph delta (\"type:Name\" or \"module:Name\").")
+        var callGraphScope: String?
+
+        @Option(name: .long, help: "Output file path. Prints to stdout if omitted.")
+        var output: String?
+
+        mutating func validate() throws {
+            try Self.validateSide(name: "old", ref: old, source: sourceOld)
+            try Self.validateSide(name: "new", ref: new, source: sourceNew)
+            let modeFlags = [sequenceFrom != nil, stateFrom != nil, package, moduleCoupling, callGraph]
+                .filter { $0 }.count
+            if modeFlags > 1 {
+                throw ValidationError(
+                    "Specify only one of --sequence-from, --state-from, --package, --module-coupling,"
+                    + " or --call-graph.")
+            }
+            if modeFlags > 0 && diagram == nil {
+                throw ValidationError("A diagram-type flag requires --diagram dot|mermaid.")
+            }
+            if callGraphScope != nil && !callGraph {
+                throw ValidationError("--call-graph-scope requires --call-graph.")
+            }
+            try DiagramLimits().validate(maxDepth: maxDepth, maxStates: maxStates)
+        }
+
+        private static func validateSide(name: String, ref: String?, source: String?) throws {
+            if ref == nil && source == nil {
+                throw ValidationError("Specify the \(name) side: a positional artifact or --source-\(name).")
+            }
+            if ref != nil && source != nil {
+                throw ValidationError(
+                    "For the \(name) side, give either a positional artifact or --source-\(name), not both.")
+            }
+        }
+
+        mutating func run() async throws {
+            let (oldArtifact, newArtifact) = try await DiffSides(
+                old: side(ref: old, source: sourceOld),
+                new: side(ref: new, source: sourceNew)
+            ).resolved()
+
+            let rendered: String
+            if let diagram {
+                rendered = try deltaDiagram(old: oldArtifact, new: newArtifact, format: diagram)
+            } else {
+                async let oldRevision = DiffRevision(oldArtifact)
+                async let newRevision = DiffRevision(newArtifact)
+                let diff = await ArtifactDiffer().diff(old: oldRevision, new: newRevision)
+                let health = HealthCheck(artifact: oldArtifact).summary
+                    .combined(with: HealthCheck(artifact: newArtifact).summary)
+                rendered = try report(for: diff, health: health)
+            }
+            try rendered.writeOutput(to: output, label: "diff")
+        }
+
+        private func side(ref: String?, source: String?) -> DiffSide {
+            DiffSide(ref: ref, source: source, language: language, generated: generatedScope.scope)
+        }
+
+        private func report(for diff: ArtifactDiff, health: HealthCheck.Summary) throws -> String {
+            switch format {
+            case .human:
+                return diff.humanReport()
+            case .json:
+                return try JSONReport(DiffPayload(diff: diff, health: health)).text
+            }
+        }
+
+        /// Renders the union of both revisions with added=green/removed=red/changed=amber.
+        private func deltaDiagram(old: CodeArtifact, new: CodeArtifact, format: FormatOption) throws -> String {
+            let diagramFormat = format.diagramFormat
+            if let sequenceFrom {
+                return try SequenceDeltaExporter(
+                    request: SequenceDiagramRequest(entryPoint: sequenceFrom, maxDepth: maxDepth)
+                ).render(old: old, new: new, format: diagramFormat)
+            } else if let stateFrom {
+                return try StateDeltaExporter(
+                    request: StateDiagramRequest(variable: stateFrom, maxStates: maxStates)
+                ).render(old: old, new: new, format: diagramFormat)
+            } else if package {
+                return PackageDeltaExporter().render(old: old, new: new, format: diagramFormat)
+            } else if moduleCoupling {
+                return ModuleCouplingDeltaExporter().render(old: old, new: new, format: diagramFormat)
+            } else if callGraph {
+                return try CallGraphDeltaExporter(
+                    request: CallGraphRequest(scope: CallGraphScopeOption(raw: callGraphScope))
+                ).render(old: old, new: new, format: diagramFormat)
+            }
+            return ClassDeltaExporter().render(old: old, new: new, format: diagramFormat)
+        }
+    }
+}
+
+/// `health` combines both sides (weaker-trust view) so a consumer of `acai diff --format json` can
+/// tell whether the delta rests on a trustworthy parse without a separate `acai analyze --health` run
+/// per side.
+private struct DiffPayload: Encodable {
+    var diff: ArtifactDiff
+    var health: HealthCheck.Summary
+}

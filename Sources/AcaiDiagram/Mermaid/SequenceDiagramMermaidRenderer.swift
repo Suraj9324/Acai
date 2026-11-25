@@ -1,0 +1,64 @@
+public struct SequenceDiagramMermaidRenderer: MermaidRenderer {
+    public let theme: DiagramTheme?
+
+    public init(theme: DiagramTheme? = nil) {
+        self.theme = theme
+    }
+
+    public func render(_ diagram: SequenceDiagram) -> String {
+        var lines: [String] = themePreamble
+        lines.append("sequenceDiagram")
+
+        var allocator = MermaidIDAllocator()
+        var idMap: [String: String] = [:]
+        for participant in diagram.participants {
+            let safe = allocator.id(for: participant.id)
+            idMap[participant.id] = safe
+            lines.append("    \(participantLine(participant, id: safe))")
+        }
+
+        for message in diagram.messages.sorted(by: { $0.order < $1.order }) {
+            guard let from = idMap[message.from], let to = idMap[message.to] else { continue }
+            lines.append("    \(from)\(arrowToken(for: message.kind))\(to): \(label(for: message))")
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// The `participant`/`actor` declaration line. `.actor` participants use Mermaid's `actor`
+    /// keyword (a stick figure); other non-object kinds show their UML stereotype above the name,
+    /// matching the DOT renderer.
+    private func participantLine(_ participant: SequenceDiagram.Participant, id: String) -> String {
+        let name = participant.name.mermaidLabelEscaped
+        if participant.kind == .actor {
+            return "actor \(id) as \(name)"
+        }
+        if let stereotype = participant.kind.stereotype {
+            return "participant \(id) as «\(stereotype)»<br/>\(name)"
+        }
+        return "participant \(id) as \(name)"
+    }
+
+    private func arrowToken(for kind: SequenceDiagram.Message.Kind) -> String {
+        switch kind {
+        case .synchronous, .create, .destroy:
+            return "->>"
+        case .asynchronous:
+            return "-)"
+        case .return:
+            return "-->>"
+        }
+    }
+
+    private func label(for message: SequenceDiagram.Message) -> String {
+        let text = (message.label ?? "").mermaidTextEscaped
+        switch message.kind {
+        case .create:
+            return text.isEmpty ? "«create»" : "«create» \(text)"
+        case .destroy:
+            return text.isEmpty ? "«destroy»" : "«destroy» \(text)"
+        default:
+            return text
+        }
+    }
+}

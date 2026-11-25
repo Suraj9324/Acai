@@ -1,0 +1,30 @@
+import SwiftSyntax
+import AcaiCore
+
+/// Collects call sites made through a closure's implicit `$0` receiver (`addedRelationships.map { "+ "
+/// + $0.reportPhrase() }`). `$0`'s type is resolved once by the caller, via `iterationClosure(in:)`;
+/// this walker only binds it inside the closure body.
+final class Closure0CallSiteWalker: SyntaxVisitor {
+    private let elementReceiver: CallReceiver
+    private let sourceLocations: SourceLocationResolver
+    private(set) var collected: [CallSite] = []
+
+    init(elementReceiver: CallReceiver, sourceLocations: SourceLocationResolver) {
+        self.elementReceiver = elementReceiver
+        self.sourceLocations = sourceLocations
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        guard let memberAccess = node.calledExpression.as(MemberAccessExprSyntax.self),
+              memberAccess.base?.as(DeclReferenceExprSyntax.self)?.baseName.text == "$0"
+        else { return .visitChildren }
+        collected.append(CallSite(
+            receiver: elementReceiver,
+            methodName: memberAccess.declName.baseName.text,
+            location: sourceLocations.sourceLocation(of: node),
+            arguments: node.callSiteArguments
+        ))
+        return .visitChildren
+    }
+}

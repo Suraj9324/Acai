@@ -1,0 +1,122 @@
+import AcaiCore
+@testable import AcaiDiagram
+
+// Diagram unit tests build synthetic artifacts and exercise the agnostic diagram layer directly,
+// without the language registry production resolves configuration from. This file supplies language
+// constants, a representative `LanguageConfiguration` fixture (a broad union of the built-in
+// languages' classification + framework stereotypes), and convenience initializers that inject it.
+// Production stays strict — it never has an empty or implicit language configuration.
+
+extension CodeArtifact.SourceLanguage {
+    static let swift = CodeArtifact.SourceLanguage(rawValue: "swift")
+    static let java = CodeArtifact.SourceLanguage(rawValue: "java")
+    static let kotlin = CodeArtifact.SourceLanguage(rawValue: "kotlin")
+    static let typeScript = CodeArtifact.SourceLanguage(rawValue: "typeScript")
+    static let javaScript = CodeArtifact.SourceLanguage(rawValue: "javaScript")
+    static let dart = CodeArtifact.SourceLanguage(rawValue: "dart")
+}
+
+extension LanguageConfiguration {
+    /// Representative classification + framework stereotypes for diagram unit tests, standing in for
+    /// what production resolves from the registry. Deliberately a broad union so tests don't depend
+    /// on any single language's exact set.
+    static let test = LanguageConfiguration(
+        primitiveTypeNames: [
+            "void", "Void", "Unit", "Nothing", "Never", "Any", "AnyObject", "any",
+            "Self", "self", "this",
+            "String", "Int", "Double", "Float", "Bool", "Character", "UInt",
+            "Int8", "Int16", "Int32", "Int64", "UInt8", "UInt16", "UInt32", "UInt64",
+            "CGFloat", "Data", "Date", "URL", "UUID", "Error", "Sendable", "Codable",
+            "Equatable", "Hashable", "Comparable", "Identifiable", "CustomStringConvertible",
+            "int", "long", "short", "byte", "float", "double", "boolean", "char",
+            "Integer", "Long", "Short", "Byte", "Boolean",
+            "Object", "Number", "Serializable", "Cloneable",
+            "string", "number", "undefined", "null", "symbol", "bigint",
+            "unknown", "never", "object", "Promise", "Function",
+            "dynamic", "num", "var", "inferred",
+            "Optional"
+        ],
+        collectionTypeNames: [
+            "List", "ArrayList", "LinkedList", "Vector", "Stack", "Queue", "Deque",
+            "ArrayDeque", "PriorityQueue",
+            "Set", "HashSet", "TreeSet", "LinkedHashSet", "MutableSet",
+            "Map", "HashMap", "TreeMap", "LinkedHashMap", "MutableMap",
+            "Array", "MutableList", "Iterable", "Collection", "Sequence",
+            "Dictionary"
+        ],
+        annotationStereotypes: [
+            "entity": "entity",
+            "table": "entity",
+            "embeddable": "embeddable",
+            "repository": "repository",
+            "service": "service",
+            "controller": "controller",
+            "restcontroller": "controller",
+            "component": "component"
+        ],
+        varianceKeywords: [.covariant: "out", .contravariant: "in"]
+    )
+}
+
+extension ClassDiagramOptions {
+    /// Test convenience mirroring the production initializer minus `language`, injecting `.test`.
+    init(
+        layoutDirection: LayoutDirection = .topToBottom,
+        showMembers: Bool = true,
+        showMemberTypes: Bool = true,
+        showAccessLevelSymbols: Bool = true,
+        minimumAccessLevel: AccessLevel? = nil,
+        includedRelationshipKinds: Set<Relationship.Kind> = Set(Relationship.Kind.allCases),
+        groupBy: GroupingStrategy = .none,
+        showGenericParameters: Bool = true,
+        fontName: String = "Helvetica",
+        fontSize: Int = 12,
+        theme: DiagramTheme? = nil,
+        inferCompositionFromProperties: Bool = true,
+        inferDependencyFromMethods: Bool = true,
+        showExternalTypes: Bool = false,
+        showMultiplicities: Bool = true,
+        showAnnotationStereotypes: Bool = true,
+        focus: FocusConfiguration? = nil
+    ) {
+        self.init(
+            layoutDirection: layoutDirection,
+            showMembers: showMembers,
+            showMemberTypes: showMemberTypes,
+            showAccessLevelSymbols: showAccessLevelSymbols,
+            minimumAccessLevel: minimumAccessLevel,
+            includedRelationshipKinds: includedRelationshipKinds,
+            groupBy: groupBy,
+            showGenericParameters: showGenericParameters,
+            fontName: fontName,
+            fontSize: fontSize,
+            theme: theme,
+            inferCompositionFromProperties: inferCompositionFromProperties,
+            inferDependencyFromMethods: inferDependencyFromMethods,
+            showExternalTypes: showExternalTypes,
+            showMultiplicities: showMultiplicities,
+            showAnnotationStereotypes: showAnnotationStereotypes,
+            focus: focus,
+            languages: LanguageConfigurationResolver(single: .test)
+        )
+    }
+}
+
+extension ClassDiagramDOTRenderer {
+    init() { self.init(options: ClassDiagramOptions()) }
+}
+
+extension ClassDiagramMermaidRenderer {
+    init() { self.init(options: ClassDiagramOptions()) }
+}
+
+extension CodeArtifact {
+    func enriched() -> CodeArtifact { enriched(configuration: .test) }
+}
+
+extension ClassDiagram {
+    init(_ artifact: CodeArtifact) {
+        self.init(artifact: artifact, options: EnrichmentOptions(
+            languages: LanguageConfigurationResolver(single: .test)))
+    }
+}

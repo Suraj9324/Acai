@@ -1,0 +1,142 @@
+import Combine
+import SwiftUI
+
+extension CanvasInteraction {
+    /// Shared, group-aware node-drag gesture: records one undo checkpoint at drag start, moves
+    /// the whole selection together, reports the dragged node's location for edge auto-pan, and
+    /// commits on release.
+    func nodeDragGesture(
+        id: String,
+        dragStartPositions: Binding<[String: CGPoint]>,
+        activeDragCanvasLocation: Binding<CGPoint?>,
+        onCommit: @escaping () -> Void
+    ) -> some Gesture {
+        DragGesture(minimumDistance: 3)
+            .onChanged { value in
+                if dragStartPositions.wrappedValue.isEmpty {
+                    self.beginLayoutGesture()
+                    self.recordUndo()
+                    if !self.selectedNodeIDs.contains(id) {
+                        self.selectedNodeIDs = [id]
+                    }
+                    for nodeID in self.selectedNodeIDs {
+                        dragStartPositions.wrappedValue[nodeID] = self.nodePosition(nodeID)
+                    }
+                }
+                let tx = value.translation.width
+                let ty = value.translation.height
+                for nodeID in self.selectedNodeIDs {
+                    guard let start = dragStartPositions.wrappedValue[nodeID] else { continue }
+                    self.moveNode(nodeID, to: CGPoint(x: start.x + tx, y: start.y + ty))
+                }
+                if let start = dragStartPositions.wrappedValue[id] {
+                    activeDragCanvasLocation.wrappedValue = CGPoint(x: start.x + tx, y: start.y + ty)
+                }
+            }
+            .onEnded { _ in
+                dragStartPositions.wrappedValue = [:]
+                activeDragCanvasLocation.wrappedValue = nil
+                self.endLayoutGesture()
+                onCommit()
+            }
+    }
+
+    func beginLayoutGesture() {
+        rotorPlanCache.hold()
+    }
+
+    func endLayoutGesture() {
+        guard rotorPlanCache.release() else { return }
+        (objectWillChange as? ObservableObjectPublisher)?.send()
+    }
+}
+
+extension View {
+    /// Cmd-click extends the selection (a plain click replaces it); a group-aware drag moves the
+    /// whole selection, committing on release.
+    @MainActor
+    func diagramNodeInteraction<Model: CanvasInteraction>(
+        id: String,
+        model: Model,
+        dragStartPositions: Binding<[String: CGPoint]>,
+        activeDragCanvasLocation: Binding<CGPoint?>,
+        onCommit: @escaping () -> Void
+    ) -> some View {
+        onTapGesture {
+            #if os(macOS)
+            let extending = NSEvent.modifierFlags.contains(.command)
+            #else
+            let extending = model.isMultiSelectActive
+            #endif
+            model.selectNode(id, extending: extending)
+        }
+        .highPriorityGesture(model.nodeDragGesture(
+            id: id,
+            dragStartPositions: dragStartPositions,
+            activeDragCanvasLocation: activeDragCanvasLocation,
+            onCommit: onCommit
+        ))
+    }
+}
+
+/// A reusable bottom-right resize handle that resizes a node while keeping its top-left fixed
+/// (the node center moves by half the size delta). Records one undo checkpoint per drag.
+struct CanvasResizeHandle<Model: CanvasInteraction>: View {
+    let id: String
+    @ObservedObject var model: Model
+    let position: CGPoint
+    let size: CGSize
+    @Binding var activeResizeState: DiagramResizeState?
+    let onCommit: () -> Void
+
+    var minWidth: CGFloat = 80
+    var minHeight: CGFloat = 50
+    var handleSize: CGFloat = 16
+    /// Larger than `handleSize` to clear Apple's ~44pt minimum touch target; macOS keeps
+    /// `handleSize` itself as the hit area, matching mouse precision.
+    var touchTargetSize: CGFloat = 44
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            #if os(macOS)
+            .cursorOnHover(.closedHand)
+            .frame(width: handleSize, height: handleSize)
+            .contentShape(Rectangle())
+            #else
+            .frame(width: handleSize, height: handleSize)
+            .contentShape(Rectangle().inset(by: -(touchTargetSize - handleSize) / 2))
+            #endif
+            .position(x: position.x + size.width / 2, y: position.y + size.height / 2)
+            .gesture(resizeGesture)
+    }
+
+    private var resizeGesture: some Gesture {
+        DragGesture(minimumDistance: 1)
+            .onChanged { value in
+                if activeResizeState == nil {
+                    model.beginLayoutGesture()
+                    model.recordUndo()
+                    activeResizeState = DiagramResizeState(
+                        startSize: model.effectiveSize(for: id),
+                        startPosition: model.nodePosition(id) ?? .zero
+                    )
+                }
+                guard let state = activeResizeState else { return }
+                let newW = max(minWidth, state.startSize.width + value.translation.width)
+                let newH = max(minHeight, state.startSize.height + value.translation.height)
+                let dw = newW - state.startSize.width
+                let dh = newH - state.startSize.height
+                model.resizeNode(id, width: newW, height: newH)
+                model.moveNode(id, to: CGPoint(
+                    x: state.startPosition.x + dw / 2,
+                    y: state.startPosition.y + dh / 2
+                ))
+            }
+            .onEnded { _ in
+                activeResizeState = nil
+                model.endLayoutGesture()
+                onCommit()
+            }
+    }
+}

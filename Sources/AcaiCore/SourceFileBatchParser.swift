@@ -1,0 +1,144 @@
+import Foundation
+
+/// Reads and parses one spec's source files concurrently, returning them in their original order so
+/// the outcome is identical to serial parsing.
+struct SourceFileBatchParser {
+
+    struct Outcome {
+        let files: [CodeArtifact]
+        let diagnostics: [ParseDiagnostic]
+        let fileCacheEntries: [String: ParsedFileCache.Entry]
+
+        static let empty = Outcome(files: [], diagnostics: [], fileCacheEntries: [:])
+    }
+
+    let codeParser: any CodeParser
+
+    let rootURL: URL
+
+    /// `nil` derives the cap from the processor count.
+    let concurrencyLimit: Int?
+
+    let maximumFileBytes: Int
+
+    let sharedParses: SharedParses?
+
+    /// A `nil` cache skips fingerprinting and yields no cache entries.
+    func parse(_ files: [URL], reusing cache: ParsedFileCache?) async throws -> Outcome {
+        guard !files.isEmpty else { return .empty }
+
+        let plan = ParsedFileBatchPlan(
+            files: files, rootURL: rootURL, cache: cache, maximumFileBytes: maximumFileBytes
+        )
+        var outcomeByIndex = plan.outcomeByIndex
+        try await parseMisses(plan.indicesNeedingParse, in: files, into: &outcomeByIndex)
+        let entries = cache == nil ? [:] : plan.cacheEntries(addingFreshlyParsed: outcomeByIndex)
+        return merge(outcomeByIndex, fileCacheEntries: entries)
+    }
+
+    // MARK: - Parsing
+
+    private func parseMisses(
+        _ indices: [Int], in files: [URL], into outcomeByIndex: inout [FileOutcome?]
+    ) async throws {
+        guard !indices.isEmpty else { return }
+        let concurrency = concurrencyLimit ?? ProcessInfo.processInfo.activeProcessorCount
+        let limit = max(1, min(indices.count, concurrency))
+        try await withThrowingTaskGroup(of: (index: Int, outcome: FileOutcome).self) { group in
+            var cursor = 0
+            func scheduleNext() {
+                guard cursor < indices.count else { return }
+                let index = indices[cursor]
+                cursor += 1
+                let file = files[index]
+                group.addTask {
+                    try Task.checkCancellation()
+                    let outcome = await self.parseFile(file)
+                    try Task.checkCancellation()
+                    return (index, outcome)
+                }
+            }
+            for _ in 0..<limit { scheduleNext() }
+            while let next = try await group.next() {
+                outcomeByIndex[next.index] = next.outcome
+                scheduleNext()
+            }
+        }
+    }
+
+    /// A read failure becomes a `.unreadable` diagnostic rather than failing the whole batch. The size
+    /// check resolves the symlink first, since `attributesOfItem(atPath:)` reports a link's own size.
+    private func parseFile(_ file: URL) async -> FileOutcome {
+        let relativePath = file.relativePath(from: rootURL)
+        let resolvedPath = file.resolvingSymlinksInPath().path
+        let attributes = try? FileManager.default.attributesOfItem(atPath: resolvedPath)
+        if let size = (attributes?[.size] as? NSNumber)?.intValue, size > maximumFileBytes {
+            return .diagnostic(ParseDiagnostic(
+                location: SourceLocation(filePath: relativePath, line: 0, column: 0),
+                kind: .skipped,
+                message: "\(size) bytes, over the \(maximumFileBytes)-byte per-file ceiling"
+            ))
+        }
+        let source: String
+        do {
+            source = try String(contentsOf: file, encoding: .utf8)
+        } catch {
+            return await decodedLossily(file, relativePath: relativePath, strictFailure: error)
+        }
+        return await .parsed(artifact(parsing: source, as: relativePath))
+    }
+
+    private func artifact(parsing source: String, as fileName: String) async -> CodeArtifact {
+        guard let sharedParses else {
+            return await codeParser.parsedOnALargeStack(source: source, fileName: fileName)
+        }
+        return await sharedParses.artifact(parsing: source, as: fileName, with: codeParser)
+    }
+
+    private func decodedLossily(
+        _ file: URL, relativePath: String, strictFailure: any Error
+    ) async -> FileOutcome {
+        guard let data = try? Data(contentsOf: file) else {
+            return .diagnostic(ParseDiagnostic(
+                location: SourceLocation(filePath: relativePath, line: 0, column: 0),
+                kind: .unreadable,
+                message: strictFailure.localizedDescription
+            ))
+        }
+        // The failable initializer returns nil for invalid UTF-8; replacing those bytes is the point.
+        // swiftlint:disable:next optional_data_string_conversion
+        let decoded = String(decoding: data, as: UTF8.self)
+        var parsed = await artifact(parsing: decoded, as: relativePath)
+        guard !decoded.utf8.elementsEqual(data) else { return .parsed(parsed) }
+        parsed.metadata.parseDiagnostics.append(ParseDiagnostic(
+            location: SourceLocation(filePath: relativePath, line: 0, column: 0),
+            kind: .lossyDecoding,
+            message: "\(relativePath) is not valid UTF-8. Every invalid byte was replaced with "
+                + "U+FFFD, so an identifier spelled with one is not the one in the source."
+        ))
+        return .parsed(parsed)
+    }
+
+    // MARK: - Merging
+
+    private func merge(
+        _ outcomeByIndex: [FileOutcome?], fileCacheEntries: [String: ParsedFileCache.Entry]
+    ) -> Outcome {
+        var files: [CodeArtifact] = []
+        var diagnostics: [ParseDiagnostic] = []
+        for case let outcome? in outcomeByIndex {
+            switch outcome {
+            case .parsed(let parsed):
+                files.append(parsed)
+            case .diagnostic(let diagnostic):
+                diagnostics.append(diagnostic)
+            }
+        }
+        return Outcome(files: files, diagnostics: diagnostics, fileCacheEntries: fileCacheEntries)
+    }
+}
+
+enum FileOutcome: Sendable {
+    case parsed(CodeArtifact)
+    case diagnostic(ParseDiagnostic)
+}

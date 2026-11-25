@@ -1,0 +1,233 @@
+import AcaiCore
+
+/// Options controlling how a `CodeArtifact` is enriched for class-diagram rendering.
+public struct EnrichmentOptions: Sendable {
+    /// When `true`, collection properties infer aggregation edges and scalar properties infer
+    /// composition edges.
+    public var inferCompositionFromProperties: Bool
+
+    public var inferDependencyFromMethods: Bool
+
+    /// When `true`, types referenced but not defined in the artifact appear as gray "external"
+    /// placeholder nodes.
+    public var showExternalTypes: Bool
+
+    /// When set, restricts the result to one type and its surrounding subgraph.
+    public var focus: FocusConfiguration?
+
+    /// Resolves each type's classification from its own language, so enrichment and external-type
+    /// detection stay agnostic across a polyglot artifact. Must match the analysis pipeline's
+    /// resolver for the same artifact — `enriched(using:)` is only idempotent under a consistent one.
+    public var languages: LanguageConfigurationResolver
+
+    public init(
+        inferCompositionFromProperties: Bool = true,
+        inferDependencyFromMethods: Bool = true,
+        showExternalTypes: Bool = false,
+        focus: FocusConfiguration? = nil,
+        languages: LanguageConfigurationResolver
+    ) {
+        self.inferCompositionFromProperties = inferCompositionFromProperties
+        self.inferDependencyFromMethods = inferDependencyFromMethods
+        self.showExternalTypes = showExternalTypes
+        self.focus = focus
+        self.languages = languages
+    }
+}
+
+/// The built class-diagram model — enriched types, resolved relationships, external placeholders
+/// and directory groups, ready to hand to a renderer.
+public struct ClassDiagram: Sendable {
+    /// All types, including flattened nested types.
+    public var types: [TypeDeclaration]
+    public var relationships: [Relationship]
+    public var externalTypes: [TypeDeclaration]
+    /// Maps each directory path to the type IDs it contains.
+    public var directoryGroups: [String: [String]]
+
+    public init(
+        types: [TypeDeclaration],
+        relationships: [Relationship],
+        externalTypes: [TypeDeclaration],
+        directoryGroups: [String: [String]]
+    ) {
+        self.types = types
+        self.relationships = relationships
+        self.externalTypes = externalTypes
+        self.directoryGroups = directoryGroups
+    }
+
+    public init(artifact: CodeArtifact, options: EnrichmentOptions) {
+        // Structural enrichment is owned by AcaiCore and runs exactly once here; it's idempotent,
+        // so an already-enriched artifact (e.g. from AnalysisService) is unaffected.
+        let base = artifact.enriched(using: options.languages)
+
+        let flatTypes = Self.flattenTypes(base.types)
+        let resolver = TypeResolver(types: flatTypes)
+        var relationships = base.relationships.map { resolver.resolve($0) }
+
+        if !options.inferCompositionFromProperties {
+            relationships.removeAll { $0.kind == .composition || $0.kind == .aggregation }
+        }
+        if !options.inferDependencyFromMethods {
+            relationships.removeAll { $0.kind == .dependency }
+        }
+
+        // Parser-produced edges are always kept; inferred edges to external targets only
+        // when `showExternalTypes` is set.
+        let knownIds = Set(flatTypes.map(\.id))
+        let inferredKinds: Set<Relationship.Kind> = [.composition, .aggregation, .dependency]
+        if !options.showExternalTypes {
+            relationships = relationships.filter { rel in
+                if knownIds.contains(rel.source) && knownIds.contains(rel.target) { return true }
+                return !inferredKinds.contains(rel.kind)
+            }
+        }
+
+        // Applied last so externals and directory groups reflect the focused set.
+        var resultTypes = flatTypes
+        if let focus = options.focus {
+            let subset = FocusedSubsetBuilder(
+                types: flatTypes, relationships: relationships, configuration: focus
+            ).subset
+            resultTypes = subset.types
+            relationships = subset.relationships
+        }
+
+        let resultKnownIds = Set(resultTypes.map(\.id))
+        self.init(
+            types: resultTypes,
+            relationships: relationships,
+            externalTypes: Self.identifyExternalTypes(
+                relationships: relationships, knownIds: resultKnownIds,
+                language: options.languages.defaultConfiguration
+            ),
+            directoryGroups: Self.buildDirectoryGroups(resultTypes)
+        )
+    }
+
+    // MARK: - Flatten Nested Types
+
+    private static func flattenTypes(
+        _ types: [TypeDeclaration],
+        parentDisplayName: String? = nil,
+        parent: (id: String, unqualifiedID: String)? = nil
+    ) -> [TypeDeclaration] {
+        var result: [TypeDeclaration] = []
+        for var type in types {
+            if let parent = parentDisplayName {
+                type.name = "\(parent).\(type.name)"
+            }
+
+            // A type nested in another module's extension is already scoped to that module.
+            if let parent, !type.id.hasPrefix(parent.id), !type.unqualifiedID.hasPrefix(parent.unqualifiedID) {
+                type.id = "\(parent.id).\(type.id.components(separatedBy: ".").last ?? type.id)"
+                type.qualifiedName = type.id
+            }
+
+            let nested = flattenTypes(
+                type.nestedTypes,
+                parentDisplayName: type.name,
+                parent: (type.id, type.unqualifiedID)
+            )
+            type.nestedTypes = []
+
+            result.append(type)
+            result.append(contentsOf: nested)
+        }
+        return result
+    }
+
+    // MARK: - Type Resolution
+
+    private struct TypeResolver {
+        let nameToId: [String: String]
+        let knownIds: Set<String>
+
+        init(types: [TypeDeclaration]) {
+            var map: [String: String] = [:]
+            var ids = Set<String>()
+            var simpleNameCount: [String: Int] = [:]
+
+            for type in types {
+                ids.insert(type.id)
+                map[type.id] = type.id
+                map[type.qualifiedName] = type.id
+                map[type.name] = type.id
+
+                let simpleName = type.name.components(separatedBy: ".").last ?? type.name
+                simpleNameCount[simpleName, default: 0] += 1
+            }
+
+            // Map simple names only when unambiguous; an ambiguous name still gets some mapping
+            // as a fallback rather than none.
+            for type in types {
+                let simpleName = type.name.components(separatedBy: ".").last ?? type.name
+                if simpleNameCount[simpleName] == 1 {
+                    map[simpleName] = type.id
+                }
+                if map[simpleName] == nil {
+                    map[simpleName] = type.id
+                }
+            }
+
+            self.nameToId = map
+            self.knownIds = ids
+        }
+
+        func resolveId(_ name: String) -> String {
+            nameToId[name] ?? name
+        }
+
+        func resolve(_ relationship: Relationship) -> Relationship {
+            var rel = relationship
+            rel.source = resolveId(rel.source)
+            rel.target = resolveId(rel.target)
+            return rel
+        }
+    }
+
+    // MARK: - External Types
+
+    private static func identifyExternalTypes(
+        relationships: [Relationship],
+        knownIds: Set<String>,
+        language: LanguageConfiguration
+    ) -> [TypeDeclaration] {
+        var externalIds = Set<String>()
+        for rel in relationships {
+            if !knownIds.contains(rel.source) && !language.isPrimitive(rel.source) {
+                externalIds.insert(rel.source)
+            }
+            if !knownIds.contains(rel.target) && !language.isPrimitive(rel.target) {
+                externalIds.insert(rel.target)
+            }
+        }
+
+        return externalIds.sorted().map { id in
+            let name = id.components(separatedBy: ".").last ?? id
+            // External, undeclared types (third-party / not in this codebase) have no known
+            // visibility; model them as public, the conventional assumption for a referenced API.
+            return TypeDeclaration(
+                id: id, name: name, qualifiedName: id, kind: .class, accessLevel: .public
+            )
+        }
+    }
+
+    // MARK: - Directory Groups
+
+    private static func buildDirectoryGroups(_ types: [TypeDeclaration]) -> [String: [String]] {
+        var groups: [String: [String]] = [:]
+        for type in types {
+            guard let filePath = type.location?.filePath else { continue }
+            let directory: String
+            if let lastSlash = filePath.lastIndex(of: "/") {
+                directory = String(filePath[filePath.startIndex..<lastSlash])
+            } else {
+                directory = ""
+            }
+            groups[directory, default: []].append(type.id)
+        }
+        return groups
+    }
+}

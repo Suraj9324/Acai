@@ -1,0 +1,149 @@
+import Foundation
+
+/// A resolved, canonical type identity — a declared type's fully-qualified id (equal to its
+/// ``TypeDeclaration/qualifiedName``). A distinct type from a bare simple name so the two identity
+/// formats can't be silently confused at a resolution boundary.
+public struct TypeID: Hashable, Sendable, Codable, CustomStringConvertible {
+    public let value: String
+
+    public init(_ value: String) {
+        self.value = value
+    }
+
+    public var description: String { value }
+}
+
+/// The outcome of resolving a referenced type name against an artifact's declared types.
+///
+/// A reference matching several types (ambiguous) is a likely-actionable defect; one matching
+/// nothing (external) is the normal case for stdlib/third-party supertypes. Both degrade
+/// transparently via ``canonicalName``, but only the ambiguous case warrants a diagnostic.
+public enum ResolvedTypeIdentity: Hashable, Sendable {
+    /// The name matched a declared type (by id, qualified name, or a globally-unambiguous simple name).
+    case resolved(TypeID)
+    /// The simple name is shared by two or more declared types (none of which is a top-level type
+    /// whose qualified name equals it), so it is left unresolved rather than bound to an arbitrary one.
+    case ambiguous(String)
+    /// The name matched no declared type — an external/unknown reference, carried through as-is.
+    case external(String)
+
+    /// The canonical string used when rewriting a relationship endpoint or supertype name: the
+    /// resolved id, or the original name for ambiguous/external references (transparent degradation,
+    /// preserving existing output).
+    public var canonicalName: String {
+        switch self {
+        case .resolved(let id):
+            return id.value
+        case .ambiguous(let name), .external(let name):
+            return name
+        }
+    }
+}
+
+/// The single authority for resolving a type reference's name to a canonical type id.
+///
+/// Type identity flows through the engine as bare `String`s in two formats — a declared type's
+/// fully-qualified `id`/`qualifiedName` and its simple `name`. This resolver centralises the
+/// name→id mapping and its ambiguity rule (a simple name resolves only when globally unique across
+/// all declared types, nested included) so every layer resolves identity the same way. Build once
+/// from an artifact's `types`, then resolve names against it.
+///
+/// A bare name is also indexed **per module** (via ``ModuleResolver``): two same-named types in
+/// different modules make the name globally ambiguous, but each module's own reference to it is not
+/// actually in doubt. ``resolve(_:referencingModule:)`` tries that module-scoped tier first, falling
+/// back to the global rule only when the referencing module has no (or more than one) match — so a
+/// cross-module bare reference still requires qualification.
+public struct TypeIdentityResolver: Sendable {
+    private let idByName: [String: String]
+    private let ambiguousSimpleNames: Set<String>
+    private let idByModuleAndSimpleName: [String: [String: String]]
+
+    public init(types: [TypeDeclaration]) {
+        var exactKeyCount: [String: Int] = [:]
+        var exactKeyID: [String: String] = [:]
+        var simpleNameCount: [String: Int] = [:]
+        var moduleSimpleNameCount: [String: [String: Int]] = [:]
+        var moduleSimpleNameID: [String: [String: String]] = [:]
+
+        // Counts each exact key (id + qualified name) rather than mapping it unconditionally: a
+        // top-level type's qualified name equals its bare name, so two top-level types sharing a
+        // name collide *here*, not just at the simple-name tier below — a collision must not
+        // silently resolve to whichever type was counted last.
+        func countKeys(_ types: [TypeDeclaration]) {
+            for type in types {
+                let unqualified = type.unqualifiedID
+                for key in Set([type.id, type.qualifiedName, unqualified]) {
+                    exactKeyCount[key, default: 0] += 1
+                    exactKeyID[key] = type.id
+                }
+                let simple = type.name.components(separatedBy: ".").last ?? type.name
+                simpleNameCount[simple, default: 0] += 1
+                let module = type.idScope.module
+                for key in Set([simple, unqualified]) {
+                    moduleSimpleNameCount[module, default: [:]][key, default: 0] += 1
+                    moduleSimpleNameID[module, default: [:]][key] = type.id
+                }
+                countKeys(type.nestedTypes)
+            }
+        }
+        countKeys(types)
+
+        var idByName: [String: String] = [:]
+        for (key, count) in exactKeyCount where count == 1 {
+            idByName[key] = exactKeyID[key]
+        }
+
+        // Simple names map only when globally unambiguous and not already an exact key — mapping an
+        // ambiguous nested name would fabricate spurious edges to whichever type was indexed last.
+        func indexSimple(_ types: [TypeDeclaration]) {
+            for type in types {
+                let simple = type.name.components(separatedBy: ".").last ?? type.name
+                if simpleNameCount[simple] == 1, idByName[simple] == nil {
+                    idByName[simple] = type.id
+                }
+                indexSimple(type.nestedTypes)
+            }
+        }
+        indexSimple(types)
+
+        self.idByName = idByName
+        self.ambiguousSimpleNames = Set(simpleNameCount.filter { $0.value > 1 }.keys)
+            .union(exactKeyCount.filter { $0.value > 1 }.keys)
+
+        var idByModuleAndSimpleName: [String: [String: String]] = [:]
+        for (module, counts) in moduleSimpleNameCount {
+            for (simple, count) in counts where count == 1 {
+                idByModuleAndSimpleName[module, default: [:]][simple] = moduleSimpleNameID[module]?[simple]
+            }
+        }
+        self.idByModuleAndSimpleName = idByModuleAndSimpleName
+    }
+
+    /// Resolves `name` against the declared types. When `referencingModule` is given (the module —
+    /// via ``ModuleResolver`` — of the type the reference occurs in), a simple name that is unique
+    /// within that module resolves there first, even if the same name is shared by a type in another
+    /// module; only a name with no (or more than one) same-module match falls through to the global
+    /// rule.
+    public func resolve(_ name: String, referencingModule: String? = nil) -> ResolvedTypeIdentity {
+        if let module = referencingModule, let id = idByModuleAndSimpleName[module]?[name] {
+            return .resolved(TypeID(id))
+        }
+        if let id = idByName[name] { return .resolved(TypeID(id)) }
+        if ambiguousSimpleNames.contains(name) { return .ambiguous(name) }
+        return .external(name)
+    }
+
+    /// The canonical id string for `name` — the resolved id, or `name` unchanged when it is ambiguous
+    /// or external. Convenience for the common "rewrite to id, else leave as-is" resolution path.
+    public func canonicalName(for name: String, referencingModule: String? = nil) -> String {
+        resolve(name, referencingModule: referencingModule).canonicalName
+    }
+
+    /// The canonical id for `name` **only** when it resolves to a declared type; `nil` for ambiguous
+    /// or external names. Use where an unknown reference must be skipped (e.g. coupling metrics count
+    /// edges only to known types) rather than carried through.
+    public func resolvedID(for name: String, referencingModule: String? = nil) -> TypeID? {
+        if case .resolved(let id) = resolve(name, referencingModule: referencingModule) { return id }
+        return nil
+    }
+}

@@ -1,0 +1,206 @@
+import Foundation
+
+struct GitHubRepositoryOwner: Decodable, Hashable {
+    var login: String
+}
+
+private struct ChangeRequestResponse: Decodable {
+    struct Branch: Decodable {
+        var ref: String
+    }
+
+    var number: Int
+    var title: String
+    var user: GitHubRepositoryOwner
+    var base: Branch
+    var head: Branch
+    var state: String
+}
+
+/// A thin, read-only `URLSession`-based client for the GitHub REST API — every endpoint here is a
+/// `GET`, and none of them can mutate anything on GitHub regardless of what the credential allows.
+struct GitHubAPIClient {
+    var credential: GitHubCredential
+    var session: URLSession = .shared
+
+    private var baseURL: URL { URL(string: "https://api.github.com")! }
+
+    enum Failure: LocalizedError, Equatable {
+        case http(Int, String)
+        case decoding(String)
+        case rateLimited(resetAt: Date?)
+        case unauthorized
+
+        var message: LocalizedStringResource {
+            switch self {
+            case .http(let status, let message):
+                .app("Error.GitHubAPIClient.Http \(status) \(message)")
+            case .decoding(let message):
+                .app("Error.GitHubAPIClient.Decoding \(message)")
+            case .rateLimited(nil):
+                .app("Error.GitHubAPIClient.RateLimited")
+            case .rateLimited(let resetAt?):
+                .app("Error.GitHubAPIClient.RateLimitedUntil \(resetAt.formatted(.relative(presentation: .named)))")
+            case .unauthorized:
+                .app("Error.GitHubAPIClient.Unauthorized")
+            }
+        }
+
+        /// Already names the reader's next step — wait for the reset, or sign in again.
+        var isActionable: Bool {
+            switch self {
+            case .rateLimited, .unauthorized:
+                true
+            case .http, .decoding:
+                false
+            }
+        }
+
+        var errorDescription: String? { String(localized: message) }
+    }
+
+    struct User: Decodable {
+        var login: String
+        var avatarURL: URL?
+
+        enum CodingKeys: String, CodingKey {
+            case login
+            case avatarURL = "avatar_url"
+        }
+    }
+
+    struct AuthenticatedUserInfo: Sendable {
+        var user: User
+        var scopes: [String]?
+        var tokenExpiresAt: Date?
+    }
+
+    struct Repository: Decodable, Identifiable, Hashable {
+        var id: Int
+        var name: String
+        var fullName: String
+        var owner: GitHubRepositoryOwner
+        var defaultBranch: String
+        var isPrivate: Bool
+        /// GitHub's estimate of the repository's size on disk, in kilobytes.
+        var sizeKilobytes: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case id, name, owner
+            case sizeKilobytes = "size"
+            case fullName = "full_name"
+            case defaultBranch = "default_branch"
+            case isPrivate = "private"
+        }
+    }
+
+    func authenticatedUser() async throws -> User {
+        try await get("user", as: User.self)
+    }
+
+    /// Same endpoint as `authenticatedUser()`, plus what the response headers reveal about the
+    /// token itself — the scope checklist and expiry prompt both read this instead.
+    func authenticatedUserWithMetadata() async throws -> AuthenticatedUserInfo {
+        let (user, response) = try await getWithResponse("user", as: User.self)
+        return AuthenticatedUserInfo(
+            user: user,
+            scopes: response?.gitHubOAuthScopes,
+            tokenExpiresAt: response?.gitHubTokenExpiresAt
+        )
+    }
+
+    /// A response shorter than this is the last page.
+    static let repositoriesPerPage = 50
+
+    func repositories(page: Int = 1) async throws -> [Repository] {
+        try await get(
+            "user/repos",
+            query: [
+                URLQueryItem(name: "per_page", value: String(Self.repositoriesPerPage)),
+                URLQueryItem(name: "page", value: String(page)),
+                URLQueryItem(name: "sort", value: "updated")
+            ],
+            as: [Repository].self
+        )
+    }
+
+    func pullRequests(owner: String, repo: String) async throws -> [ChangeRequest] {
+        try await get(
+            "repos/\(owner)/\(repo)/pulls",
+            query: [URLQueryItem(name: "per_page", value: "100")],
+            as: [ChangeRequestResponse].self
+        ).map {
+            ChangeRequest(
+                number: $0.number, title: $0.title, authorLogin: $0.user.login,
+                baseRef: $0.base.ref, headRef: $0.head.ref, state: $0.state)
+        }
+    }
+
+    private func get<T: Decodable>(_ path: String, query: [URLQueryItem] = [], as type: T.Type) async throws -> T {
+        try await getWithResponse(path, query: query, as: type).0
+    }
+
+    private func getWithResponse<T: Decodable>(
+        _ path: String, query: [URLQueryItem] = [], as type: T.Type
+    ) async throws -> (T, HTTPURLResponse?) {
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+        if !query.isEmpty { components.queryItems = query }
+        var request = URLRequest(url: components.url!)
+        request.setValue(credential.authorizationHeaderValue, forHTTPHeaderField: "Authorization")
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        let (data, response) = try await session.data(for: request)
+        try validate(response, data: data)
+        do {
+            return (try JSONDecoder().decode(T.self, from: data), response as? HTTPURLResponse)
+        } catch {
+            throw Failure.decoding(error.localizedDescription)
+        }
+    }
+
+    private func validate(_ response: URLResponse, data: Data) throws {
+        guard let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) else { return }
+        if http.statusCode == 401 { throw Failure.unauthorized }
+        if http.isGitHubRateLimited { throw Failure.rateLimited(resetAt: http.gitHubRateLimitResetAt) }
+        throw Failure.http(http.statusCode, String(data: data, encoding: .utf8) ?? "HTTP \(http.statusCode)")
+    }
+}
+
+extension HTTPURLResponse {
+    /// A 403 is a rate limit only with a spent quota or a `retry-after`; otherwise it is a permission failure.
+    var isGitHubRateLimited: Bool {
+        switch statusCode {
+        case 429:
+            true
+        case 403:
+            value(forHTTPHeaderField: "x-ratelimit-remaining") == "0"
+                || value(forHTTPHeaderField: "retry-after") != nil
+        default:
+            false
+        }
+    }
+
+    /// `retry-after` is seconds from now and takes precedence; `x-ratelimit-reset` is epoch seconds.
+    var gitHubRateLimitResetAt: Date? {
+        if let raw = value(forHTTPHeaderField: "retry-after"), let seconds = Double(raw) {
+            return Date(timeIntervalSinceNow: seconds)
+        }
+        guard let raw = value(forHTTPHeaderField: "x-ratelimit-reset"), let seconds = Double(raw) else { return nil }
+        return Date(timeIntervalSince1970: seconds)
+    }
+
+    var gitHubOAuthScopes: [String]? {
+        guard let raw = value(forHTTPHeaderField: "X-OAuth-Scopes"), !raw.isEmpty else { return nil }
+        return raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    }
+
+    /// Parsed leniently (ISO 8601, falling back to an RFC-1123-ish format) — an unrecognized
+    /// format degrades to `nil` rather than crashing.
+    var gitHubTokenExpiresAt: Date? {
+        guard let raw = value(forHTTPHeaderField: "github-authentication-token-expiration") else { return nil }
+        if let date = ISO8601DateFormatter().date(from: raw) { return date }
+        let rfc1123 = DateFormatter()
+        rfc1123.locale = Locale(identifier: "en_US_POSIX")
+        rfc1123.dateFormat = "yyyy-MM-dd HH:mm:ss zzz"
+        return rfc1123.date(from: raw)
+    }
+}

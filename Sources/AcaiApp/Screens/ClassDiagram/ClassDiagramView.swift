@@ -1,0 +1,477 @@
+import SwiftUI
+import AcaiCore
+import AcaiDiagram
+import AcaiRender
+import UniformTypeIdentifiers
+
+struct ClassDiagramView: View {
+    let diagram: GeneratedDiagram
+    let artifact: CodeArtifact
+    let codebase: Codebase
+    let isComparePresented: Binding<Bool>
+    let comparisonArtifact: CodeArtifact?
+
+    @EnvironmentObject private var model: ProjectBrowserViewModel
+    @Environment(\.accessibilityReduceMotion) var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @StateObject var viewModel: ClassDiagramViewModel
+
+    @State var canvasScale: CGFloat
+    @State var canvasOffset: CGPoint
+    @State private var dragStartPositions: [String: CGPoint] = [:]
+    @State private var activeDragCanvasLocation: CGPoint?
+    @State private var canvasAutoPanController = EdgeAutoPanController()
+    @State private var activeResizeState: DiagramResizeState?
+    @State var showSidebar = false
+    @State var sidebarTab: ClassDiagramSidebarTab = .settings
+    @State private var hasCenteredAfterMeasurement = false
+    @Environment(\.diagramHasBeenFitted) private var hostHasBeenFitted
+    /// `.zero` until the canvas reports its real size, so `FitToView` declines to fit against a placeholder.
+    @State var canvasViewportSize = CGSize.zero
+    @State var isSearchBarVisible = false
+    @Namespace private var rotorNamespace
+    @FocusState var isSearchFieldFocused: Bool
+    #if os(iOS)
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
+    #endif
+    @Environment(\.compareChangedFileSelection) var changedFileSelection
+    @Environment(\.comparisonIdentity) private var comparisonIdentity
+
+    private var isCompactWidth: Bool {
+        #if os(iOS)
+        horizontalSizeClass == .compact
+        #else
+        false
+        #endif
+    }
+
+    init(
+        diagram: GeneratedDiagram, artifact: CodeArtifact, codebase: Codebase,
+        isComparePresented: Binding<Bool>, comparisonArtifact: CodeArtifact? = nil
+    ) {
+        self.diagram = diagram
+        self.artifact = artifact
+        self.codebase = codebase
+        self.isComparePresented = isComparePresented
+        self.comparisonArtifact = comparisonArtifact
+        let restoredSizes = diagram.nodeSizes.mapValues { $0.cgSize }
+        self._viewModel = StateObject(wrappedValue: ClassDiagramViewModel(
+            codebase: codebase,
+            artifact: artifact,
+            configuration: diagram.classConfiguration ?? .init(),
+            restoredPositions: diagram.nodePositions.mapValues { $0.cgPoint },
+            restoredSizes: restoredSizes,
+            comparisonArtifact: comparisonArtifact
+        ))
+        self._canvasScale = State(initialValue: CGFloat(diagram.canvasScale))
+        self._canvasOffset = State(initialValue: CGPoint(x: diagram.canvasOffsetX, y: diagram.canvasOffsetY))
+    }
+
+    var body: some View {
+        sidebarPresentedCanvas
+            .onChange(of: changedFileSelection.wrappedValue) { _, _ in applyChangedFileSelection() }
+            .onAppear { applyChangedFileSelection() }
+            .onChange(of: comparisonIdentity) { _, _ in
+                viewModel.updateComparison(artifact: artifact, comparison: comparisonArtifact)
+            }
+            .onPreferenceChange(NodeSizePreferenceKey.self) { sizes in
+                viewModel.updateMeasuredSizes(sizes)
+                centerOnceMeasured()
+            }
+            .onChange(of: canvasViewportSize) { _, _ in centerOnceMeasured() }
+            .onAppear { viewModel.updateDynamicTypeSize(dynamicTypeSize) }
+            .onChange(of: dynamicTypeSize) { _, newValue in viewModel.updateDynamicTypeSize(newValue) }
+            .toolbar {
+                ToolbarItemGroup {
+                    UndoRedoToolbarButtons(model: viewModel, onChange: savePositions)
+                    #if !os(macOS)
+                    MultiSelectToggleButton(model: viewModel)
+                    #endif
+
+                    Button {
+                        centerDiagram()
+                    } label: {
+                        Label(.app("View.ClassDiagramView.FitView"), systemImage: "rectangle.dashed")
+                    }
+                    .help(.app("View.ClassDiagramView.FitDiagramVisibleCanvas"))
+                    .keyboardShortcut(.fitToView)
+                    .accessibilityIdentifier("diagram.fitToViewButton")
+                    Button {
+                        showSearchBar()
+                    } label: {
+                        Label(.app("View.ClassDiagramView.FindInDiagram"), systemImage: "magnifyingglass")
+                    }
+                    .help(.app("View.ClassDiagramView.FindNodeByName"))
+                    .keyboardShortcut(.findInDiagram)
+                    .accessibilityIdentifier("diagram.search.toggleButton")
+                    Button {
+                        showSidebar.toggle()
+                    } label: {
+                        Label(.app("View.ClassDiagramView.Sidebar"), systemImage: "sidebar.trailing")
+                    }
+                    .help(.app("View.ClassDiagramView.ToggleSidebar"))
+                    .accessibilityIdentifier("diagram.sidebarToggleButton")
+                }
+            }
+            .diagramCanvasLifecycle(
+                title: diagram.name, model: viewModel, undoRedoEnabled: !isSearchFieldFocused,
+                onSave: savePositions, onCenter: { centerDiagram() }
+            )
+            .onChange(of: viewModel.currentSearchNodeID) { _, nodeID in
+                centerOnSearchMatch(nodeID)
+            }
+    }
+
+    /// On compact width (iPhone), `.inspector` collapses to a sheet-like presentation with no
+    /// navigation-bar chrome — a nested `NavigationStack` + `.toolbar` close button never renders
+    /// there. A real `.sheet(isPresented:)` sidesteps this (same pattern as `CompareOverlayButton`'s
+    /// iOS sheet). Regular width (iPad/macOS) uses the native `.inspector` sidebar.
+    @ViewBuilder
+    private var sidebarPresentedCanvas: some View {
+        #if os(iOS)
+        if isCompactWidth {
+            canvasContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .sheet(isPresented: $showSidebar) {
+                    NavigationStack {
+                        sidebar
+                            .navigationTitle(diagram.name)
+                            .navigationBarTitleDisplayMode(.inline)
+                            .toolbar {
+                                ToolbarItem(placement: .confirmationAction) {
+                                    Button(.app("View.ClassDiagramView.Done")) { showSidebar = false }
+                                        .accessibilityIdentifier("diagram.sidebarDoneButton")
+                                }
+                            }
+                    }
+                }
+        } else {
+            canvasContent
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .inspector(isPresented: $showSidebar) {
+                    sidebar
+                        .inspectorColumnWidth(min: 240, ideal: 300, max: 380)
+                }
+        }
+        #else
+        canvasContent
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .inspector(isPresented: $showSidebar) {
+                sidebar
+                    .inspectorColumnWidth(min: 240, ideal: 300, max: 380)
+            }
+        #endif
+    }
+
+    /// The Settings tab hosts the re-layout/export actions the toolbar no longer carries; the
+    /// sidebar itself has no canvas state, so those closures stay owned here.
+    private var sidebar: ClassDiagramSidebar {
+        ClassDiagramSidebar(
+            viewModel: viewModel, diagram: diagram, artifact: artifact, tab: $sidebarTab,
+            onRelayout: {
+                viewModel.recordUndo()
+                viewModel.performLayout()
+                centerDiagram()
+            },
+            onSaveAsFreeform: {
+                model.saveAsFreeformDiagram(
+                    id: diagram.id,
+                    positions: viewModel.nodePositions,
+                    scale: canvasScale,
+                    offset: canvasOffset
+                )
+            },
+            onExportImage: exportImage
+        )
+    }
+
+    // MARK: - Canvas Content
+
+    private var canvasContent: some View {
+        let rotors = viewModel.rotorPlan
+        return PannableCanvas(
+            model: viewModel,
+            scale: $canvasScale,
+            offset: $canvasOffset,
+            activeDragCanvasLocation: activeDragCanvasLocation,
+            autoPanController: canvasAutoPanController,
+            onViewportSizeChange: { canvasViewportSize = $0 },
+            content: {
+                ZStack {
+                    GroupingBoxLayer(viewModel: viewModel, rotors: rotors)
+                    nodeLayer(rotors: rotors)
+                    edgeLayer(rotors: rotors)
+                    resizeHandleLayer
+                    selectionRectangleLayer
+                }
+            }
+        )
+        .diagramRotors(rotors, in: rotorNamespace) { target in
+            canvasOffset = CanvasCentering(viewport: canvasViewportSize, scale: canvasScale)
+                .offset(revealing: target.frame, from: canvasOffset)
+        }
+        .overlay {
+            if let nodeLimitError = viewModel.nodeLimitError {
+                nodeLimitErrorState(message: nodeLimitError.message)
+            } else if viewModel.nodes.isEmpty {
+                DiagramEmptyScopeOverlay(reason: viewModel.emptyReason) {
+                    ContentUnavailableView {
+                        Label(.app("View.ClassDiagramView.NoTypesToDiagram"), systemImage: "square.dashed")
+                    } description: {
+                        Text(.app("View.ClassDiagramView.NoTypesToDiagramDetail"))
+                    }
+                } onUndo: {
+                    editor.clearEmptyScope(for: viewModel.emptyReason)
+                }
+            }
+        }
+        // Overlay inside the canvas (not a sibling spanning the inspector column too), so it doesn't
+        // render on top of the inspector when open — same as PannableCanvas's zoom indicator.
+        .overlay(alignment: .topTrailing) {
+            CompareOverlayButton(diagram: diagram, isPresented: isComparePresented)
+        }
+        .overlay(alignment: .top) {
+            if isSearchBarVisible {
+                DiagramSearchBar(
+                    query: $viewModel.searchQuery,
+                    matchCount: viewModel.searchMatchIDs.count,
+                    isFocused: $isSearchFieldFocused,
+                    onStepForward: viewModel.stepSearchForward,
+                    onStepBackward: viewModel.stepSearchBackward,
+                    onDismiss: hideSearchBar
+                )
+                .padding(.top, .spacingS)
+            }
+        }
+    }
+
+    /// Shown instead of the canvas when `configuration.maxNodes` is exceeded — the diagram was never
+    /// laid out, so there is nothing to draw and a blank canvas would read as "no data" rather than
+    /// "too much data". `message` names the exact count and comes from `AcaiDiagram`, which is shared
+    /// with the CLI/MCP and not localized, so it is shown verbatim as detail under a localized title.
+    private func nodeLimitErrorState(message: String) -> some View {
+        VStack(spacing: 16) {
+            Image(systemName: "rectangle.expand.vertical")
+                .font(.system(size: 40))
+                .foregroundStyle(.secondary)
+            Text(.app("View.ClassDiagramView.DiagramTooLarge"))
+                .font(.title3)
+                .foregroundStyle(.secondary)
+            Text(verbatim: message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 32)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(.background)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("diagram.nodeLimitError")
+    }
+}
+
+// MARK: - Canvas Layers
+
+extension ClassDiagramView {
+    // MARK: - Edge Layer
+
+    private func edgeLayer(rotors: DiagramRotorPlan) -> some View {
+        let edges = viewModel.edges.removingDuplicates(by: \.id)
+        return ForEach(edges) { edge in
+            if let sourceRect = viewModel.nodeRect(for: edge.sourceID),
+               let targetRect = viewModel.nodeRect(for: edge.targetID) {
+                RelationshipEdgeView(
+                    kind: edge.kind,
+                    sourceRect: sourceRect,
+                    targetRect: targetRect,
+                    sourceLabel: edge.sourceLabel,
+                    targetLabel: edge.targetLabel,
+                    strokeColor: viewModel.deltaColor(for: edge),
+                    accessibilityDescription: rotors.edgeAccessibility(
+                        of: edge.rotorID, identifier: edge.accessibilityIdentifier, namespace: rotorNamespace
+                    ) ?? viewModel.edgeAccessibility(for: edge, nodeNames: viewModel.nodeNamesByID)
+                        .rotorMember(id: edge.rotorID, in: rotors, namespace: rotorNamespace)
+                )
+            }
+        }
+    }
+
+    // MARK: - Node Layer
+
+    private func showDetails(for id: String) {
+        viewModel.selectNode(id, extending: false)
+        sidebarTab = .inspector
+        showSidebar = true
+    }
+
+    private var editor: ClassDiagramConfigEditor {
+        ClassDiagramConfigEditor(model: model, viewModel: viewModel, diagramID: diagram.id, artifact: artifact)
+    }
+
+    private func nodeLayer(rotors: DiagramRotorPlan) -> some View {
+        let isSearching = !viewModel.searchQuery.isEmpty
+        let searchMatches = Set(viewModel.searchMatchIDs)
+        let currentSearchMatch = viewModel.currentSearchNodeID
+        return ForEach(viewModel.nodes.removingDuplicates { $0.id }) { node in
+            if let position = viewModel.nodePositions[node.id] {
+                let selected = viewModel.selectedNodeIDs.contains(node.id)
+                typeNodeBody(node, isSelected: selected)
+                    .opacity(isSearching && !searchMatches.contains(node.id) ? 0.25 : 1)
+                    .overlay {
+                        if isSearching && node.id == currentSearchMatch {
+                            RoundedRectangle(cornerRadius: 5).stroke(Color.yellow, lineWidth: 3)
+                        }
+                    }
+                    .diagramNodeAccessibility(
+                        DiagramElementDescription(typeNode: node, delta: viewModel.deltaBadge(for: node)),
+                        identifier: "diagram.typeNode.\(node.name)",
+                        isSelected: selected,
+                        onSelect: { viewModel.selectNode(node.id, extending: false) },
+                        onShowDetails: { showDetails(for: node.id) }
+                    )
+                    .diagramRotorMember(id: node.id, in: rotors, namespace: rotorNamespace)
+                    .position(position)
+                    .onTapGesture(count: 2) {
+                        showDetails(for: node.id)
+                    }
+                    .onTapGesture(count: 1) {
+                        #if os(macOS)
+                        let extending = NSEvent.modifierFlags.contains(.command)
+                        #else
+                        let extending = viewModel.isMultiSelectActive
+                        #endif
+                        viewModel.selectNode(node.id, extending: extending)
+                    }
+                    .highPriorityGesture(viewModel.nodeDragGesture(
+                        id: node.id,
+                        dragStartPositions: $dragStartPositions,
+                        activeDragCanvasLocation: $activeDragCanvasLocation,
+                        onCommit: savePositions
+                    ))
+                    .contextMenu {
+                        typeNodeContextMenu(node)
+                    }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func typeNodeBody(_ node: GeneratedDiagramNode, isSelected: Bool) -> some View {
+        let deltaBorder = viewModel.deltaColor(for: node)
+        let deltaBadge = viewModel.deltaBadge(for: node)
+        if viewModel.userNodeSizes[node.id] != nil {
+            let size = viewModel.effectiveSize(for: node.id)
+            TypeNodeView(node: node, isSelected: isSelected, borderOverride: deltaBorder, badge: deltaBadge)
+                .frame(width: size.width, height: size.height)
+                .contentShape(Rectangle().inset(by: 6))
+        } else {
+            TypeNodeView(node: node, isSelected: isSelected, borderOverride: deltaBorder, badge: deltaBadge)
+                .measuredNode(id: node.id)
+        }
+    }
+
+    @ViewBuilder
+    private func typeNodeContextMenu(_ node: GeneratedDiagramNode) -> some View {
+        Button {
+            showDetails(for: node.id)
+        } label: {
+            Label(.app("View.ClassDiagramView.Details"), systemImage: "info")
+        }
+        Divider()
+        Toggle(.app("View.ClassDiagramView.ShowMembers"), isOn: editor.typeVisibility(
+            node.id, override: \.propertyVisibility, default: \.showProperties))
+        Toggle(.app("View.ClassDiagramView.ShowFunctions"), isOn: editor.typeVisibility(
+            node.id, override: \.methodVisibility, default: \.showMethods))
+        if node.kind == .enum {
+            Toggle(.app("View.ClassDiagramView.ShowEnumCases"), isOn: editor.typeVisibility(
+                node.id, override: \.enumCaseVisibility, default: \.showEnumCases))
+        }
+    }
+
+    // MARK: - Resize Handle Layer
+
+    @ViewBuilder private var resizeHandleLayer: some View {
+        let nodes = viewModel.nodes
+            .filter { viewModel.selectedNodeIDs.contains($0.id) }
+            .removingDuplicates(by: \.id)
+        ForEach(nodes) { node in
+            if let position = viewModel.nodePositions[node.id] {
+                let size = viewModel.effectiveSize(for: node.id)
+                CanvasResizeHandle(
+                    id: node.id,
+                    model: viewModel,
+                    position: position,
+                    size: size,
+                    activeResizeState: $activeResizeState,
+                    onCommit: savePositions
+                )
+            }
+        }
+    }
+
+    // MARK: - Selection Rectangle
+
+    @ViewBuilder
+    private var selectionRectangleLayer: some View {
+        if let rect = viewModel.selectionRect {
+            Rectangle()
+                .stroke(Color.accentColor, lineWidth: 1)
+                .background(Color.accentColor.opacity(0.1))
+                .frame(width: rect.width, height: rect.height)
+                .position(x: rect.midX, y: rect.midY)
+        }
+    }
+
+}
+
+// MARK: - Image Export
+
+extension ClassDiagramView {
+    /// Prompts for a destination, then renders the current diagram (WYSIWYG, including user drags)
+    /// to PNG and writes it. Rendering happens only after the user confirms, so cancelling the save
+    /// panel wastes no work — important for large diagrams where rendering is slow.
+    private func exportImage() {
+        model.exportImage(named: diagram.name, using: viewModel)
+    }
+}
+
+// MARK: - Save & Center
+
+extension ClassDiagramView {
+    private func savePositions() {
+        savePositions(debounced: false)
+    }
+
+    func savePositions(debounced: Bool) {
+        model.diagrams.updatePositions(
+            diagramID: diagram.id,
+            positions: viewModel.nodePositions,
+            sizes: viewModel.userNodeSizes,
+            scale: canvasScale,
+            offset: canvasOffset,
+            debounced: debounced
+        )
+    }
+
+    /// The initial auto-fit can run before nodes report real sizes or before the canvas has a size,
+    /// landing on a stale fit; fit once both are in, and only count it done when it actually applied.
+    private func centerOnceMeasured() {
+        let hasBeenFitted = hostHasBeenFitted?.wrappedValue ?? hasCenteredAfterMeasurement
+        guard !hasBeenFitted, viewModel.hasPerformedMeasuredLayout, centerDiagram() else { return }
+        hasCenteredAfterMeasurement = true
+        hostHasBeenFitted?.wrappedValue = true
+    }
+
+    @discardableResult
+    private func centerDiagram() -> Bool {
+        guard let fit = FitToView(
+            nodeIDs: viewModel.nodes.map(\.id),
+            rect: { viewModel.nodeRect(for: $0) },
+            viewport: canvasViewportSize
+        ).transform else { return false }
+        canvasScale = fit.scale
+        canvasOffset = fit.offset
+        savePositions()
+        return true
+    }
+}

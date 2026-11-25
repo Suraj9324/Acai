@@ -1,0 +1,71 @@
+classDiagram
+    %% The user's whole collection: every playlist in one place.
+    class Dart_Library["Library"] {
+        +playlists List~Playlist~
+        +Library(playlists List)
+        +addPlaylist(playlist Playlist) void
+        +playlist(named String) Playlist
+    }
+    %% Shared base for every item in the library.
+    class Dart_MediaItem["MediaItem"] {
+        +title String
+        +duration double
+        +genre Genre
+        +MediaItem(title String, duration double, genre Genre)
+        +play() void
+    }
+    %% Anything the player knows how to play.
+    class Dart_Playable["Playable"] {
+        +title String
+        +duration double
+        +play() void*
+    }
+    %% A coarse classification for a piece of media.
+    class Dart_Genre["Genre"] {
+        <<enumeration>>
+        pop
+        rock
+        jazz
+        classical
+        electronic
+        spokenWord
+    }
+    %% Drives playback over a library. Depends on [Library] and the [Playable] interface.
+    class Dart_Player["Player"] {
+        +library Library
+        +nowPlaying Playable?
+        +Player(library Library)
+        +play(item Playable) void
+        +playFirstItem(playlistNamed String) void
+    }
+    %% An ordered collection of media items the user has curated.
+    class Dart_Playlist["Playlist"] {
+        +name String
+        +items List~MediaItem~
+        +totalDuration double
+        +Playlist(name String, items List)
+        +add(item MediaItem) void
+    }
+    %% One episode of a podcast.
+    class Dart_Podcast["Podcast"] {
+        +host String
+        +episodeNumber int
+        +Podcast(title String, duration double, host String, episodeNumber int)
+        +play() void
+    }
+    %% A single track by an artist.
+    class Dart_Song["Song"] {
+        +artist String
+        +album String?
+        +Song(title String, duration double, genre Genre, artist String, album String?)
+        +play() void
+    }
+    Dart_Playable <|.. Dart_MediaItem
+    Dart_MediaItem <|-- Dart_Podcast
+    Dart_MediaItem <|-- Dart_Song
+    Dart_Library o-- "*" Dart_Playlist : playlists
+    Dart_MediaItem *-- "1" Dart_Genre : genre
+    Dart_Player *-- "1" Dart_Library : library
+    Dart_Player *-- "0..1" Dart_Playable : nowPlaying
+    Dart_Playlist o-- "*" Dart_MediaItem : items
+    Dart_Song ..> Dart_Genre

@@ -1,0 +1,1 @@
+C has no default parameter value; every argument is passed at every call site.

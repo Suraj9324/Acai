@@ -1,0 +1,82 @@
+import SwiftUI
+import AcaiDiagram
+import AcaiDiff
+import AcaiQuality
+
+enum PackageDiagramSidebarTab {
+    case settings, inspector
+}
+
+/// Package Diagram's sidebar: a Settings tab (Export actions moved off the toolbar) plus
+/// the selection-scoped Inspector (`PackageDiagramInspector`). Package Diagram has no entry-point/
+/// scope configuration of its own (it always spans every build module) — the selector `filter` is
+/// its first real configuration option, unlike Call Graph, which also folds its "Configure Scope"
+/// sheet in here.
+struct PackageDiagramSidebar: View {
+    let diagram: PackageDiagram
+    let selectedNodeIDs: Set<String>
+    @Binding var filter: AcaiQuality.Selector?
+    let codebaseID: UUID
+    @Binding var tab: PackageDiagramSidebarTab
+    let onSelect: (String) -> Void
+    let onSaveAsFreeform: () -> Void
+    let onExportImage: () -> Void
+    /// `nil` for every id when the diagram isn't in delta mode.
+    var deltaStatus: (String) -> DeltaStatus? = { _ in nil }
+
+    @EnvironmentObject private var model: ProjectBrowserViewModel
+
+    var body: some View {
+        VStack(spacing: .zero) {
+            Picker("", selection: $tab) {
+                Text(.app("View.PackageDiagramSidebar.Settings")).tag(PackageDiagramSidebarTab.settings)
+                Text(.app("View.PackageDiagramSidebar.Inspector")).tag(PackageDiagramSidebarTab.inspector)
+            }
+            .pickerStyle(.segmented)
+            .padding(.spacingS)
+
+            Divider()
+
+            switch tab {
+            case .settings:
+                settingsContent
+                    .accessibilityIdentifier("diagram.sidebarContent.settings")
+            case .inspector:
+                PackageDiagramInspector(
+                    diagram: diagram, selectedNodeIDs: selectedNodeIDs, onSelect: onSelect, deltaStatus: deltaStatus
+                )
+                .accessibilityIdentifier("diagram.sidebarContent.inspector")
+            }
+        }
+        .background {
+            #if os(macOS)
+            Color(nsColor: .controlBackgroundColor)
+            #else
+            Color(uiColor: .secondarySystemBackground)
+            #endif
+        }
+    }
+
+    private var settingsContent: some View {
+        Form {
+            DiagramFilterSection(
+                filter: $filter,
+                projectID: model.projectID(for: codebaseID) ?? codebaseID
+            )
+
+            Section(.app("View.PackageDiagramSidebar.Export")) {
+                Button(action: onSaveAsFreeform) {
+                    Label(.app("View.PackageDiagramSidebar.SaveFreeform"), systemImage: "document.on.document")
+                }
+                .help(.app("View.PackageDiagramSidebar.SaveCopyEditableFreeform"))
+                .accessibilityIdentifier("diagram.saveAsFreeformButton")
+                Button(action: onExportImage) {
+                    Label(.app("View.PackageDiagramSidebar.ExportImage"), systemImage: "photo")
+                }
+                .help(.app("View.PackageDiagramSidebar.ExportDiagramImage"))
+                .accessibilityIdentifier("diagram.exportImageButton")
+            }
+        }
+        .formStyle(.grouped)
+    }
+}

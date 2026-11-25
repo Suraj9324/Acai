@@ -1,0 +1,129 @@
+import AcaiCore
+
+/// A predicate that selects nodes (types) or modules in the relationship graph. Every facet is
+/// optional and AND-combined: a node matches when *all* present facets match it. This is the shared
+/// matching vocabulary for every rule kind. It names no language — `stereotype`/`annotation` are
+/// resolved against the injected `LanguageConfiguration` map, never hardcoded markers.
+public struct Selector: Codable, Hashable, Sendable {
+    /// Exact module/target name, or a glob (`*`, `?`) over it.
+    public var module: String?
+    /// Glob (`*`, `?`) over a type's canonical id / qualified name, or its id as source spells it.
+    public var typeGlob: String?
+    /// Required UML stereotype (e.g. `entity`, `repository`), resolved from annotations + kind.
+    public var stereotype: String?
+    /// Required annotation marker (normalized: `@Entity`, `jakarta.persistence.Entity` → `entity`).
+    public var annotation: String?
+    /// Minimum visibility the type must have (e.g. `public`).
+    public var minimumAccess: AccessLevel?
+    /// Required declaration kind (e.g. `class`) — lets a rule target only classes vs protocols.
+    public var kind: TypeKind?
+    /// Required source language — scopes a budget to types parsed from one language, so a metric
+    /// that means something different per language (e.g. `mutablePublicState`, meaningless where the
+    /// language has no access control) isn't set by whichever language dominates a polyglot codebase.
+    public var language: CodeArtifact.SourceLanguage?
+    /// Minimum member count — selects "god" types (e.g. classes with many members).
+    public var minMembers: Int?
+    /// Minimum nested-type depth — selects deeply nested types (scope a rule onto them).
+    public var minNesting: Int?
+    /// Exact set of type ids to allow through — everything else fails, regardless of the other
+    /// facets. Unlike `typeGlob` (one pattern), this pins an arbitrary, pre-picked group of types,
+    /// e.g. a diagram scoped to exactly the nodes a user selected.
+    public var explicitIDs: Set<String>?
+    /// Exact set of module names to allow through a `matchesModule(named:)` check — everything else
+    /// fails, regardless of `module`. Unlike `module` (one glob), this pins an arbitrary, pre-picked
+    /// group of modules, e.g. a package diagram scoped to exactly a dependency cycle's members.
+    public var explicitModules: Set<String>?
+    /// Carve-outs: anything matching any of these is outside this selector, whatever the facets say.
+    public var exclude: [Selector]?
+
+    public init(
+        module: String? = nil,
+        typeGlob: String? = nil,
+        stereotype: String? = nil,
+        annotation: String? = nil,
+        minimumAccess: AccessLevel? = nil,
+        kind: TypeKind? = nil,
+        language: CodeArtifact.SourceLanguage? = nil,
+        minMembers: Int? = nil,
+        minNesting: Int? = nil,
+        explicitIDs: Set<String>? = nil,
+        explicitModules: Set<String>? = nil,
+        exclude: [Selector]? = nil
+    ) {
+        self.module = module
+        self.typeGlob = typeGlob
+        self.stereotype = stereotype
+        self.annotation = annotation
+        self.minimumAccess = minimumAccess
+        self.kind = kind
+        self.language = language
+        self.minMembers = minMembers
+        self.minNesting = minNesting
+        self.explicitIDs = explicitIDs
+        self.explicitModules = explicitModules
+        self.exclude = exclude
+    }
+
+    public func matches(_ node: GraphView.Node) -> Bool {
+        if let exclude, exclude.contains(where: { $0.matches(node) }) { return false }
+        return matchesIdentity(node) && matchesDeclaration(node)
+    }
+
+    private func matchesIdentity(_ node: GraphView.Node) -> Bool {
+        if let explicitIDs, !explicitIDs.contains(node.id) { return false }
+        if let module, !Glob(module).matches(node.module) { return false }
+        if let typeGlob, ![node.id, node.qualifiedName, node.unqualifiedID].contains(where: Glob(typeGlob).matches) {
+            return false
+        }
+        return true
+    }
+
+    private func matchesDeclaration(_ node: GraphView.Node) -> Bool {
+        if let stereotype, node.stereotype != stereotype { return false }
+        if let annotation, !node.annotations.contains(annotation.normalizedAnnotation) { return false }
+        if let minimumAccess, node.access.visibilityRank < minimumAccess.visibilityRank { return false }
+        if let kind, node.kind != kind { return false }
+        if let language, node.language != language { return false }
+        if let minMembers, node.memberCount < minMembers { return false }
+        if let minNesting, node.nestingDepth < minNesting { return false }
+        return true
+    }
+
+    /// Whether this selector matches a module by name. Only `explicitModules`/`module` are
+    /// consulted; a selector with neither matches every module (used by whole-codebase budgets).
+    /// An exclusion applies here only when it names modules, or a type-only one would exclude all.
+    public func matchesModule(named name: String) -> Bool {
+        if let exclude, exclude.contains(where: { $0.namesModules && $0.matchesModule(named: name) }) {
+            return false
+        }
+        if let explicitModules, !explicitModules.contains(name) { return false }
+        guard let module else { return true }
+        return Glob(module).matches(name)
+    }
+
+    /// Whether this selector matches a node identified only by name — e.g. a state diagram's
+    /// state, which carries no `TypeDeclaration` for the other facets to check against. Consults
+    /// `typeGlob` (against the name) and `explicitIDs`; a selector with neither matches every name.
+    public func matchesName(_ name: String) -> Bool {
+        if let exclude, exclude.contains(where: { $0.namesTypes && $0.matchesName(name) }) { return false }
+        if let explicitIDs, !explicitIDs.contains(name) { return false }
+        if let typeGlob, !Glob(typeGlob).matches(name) { return false }
+        return true
+    }
+
+    private var namesModules: Bool { module != nil || explicitModules != nil }
+
+    private var namesTypes: Bool { typeGlob != nil || explicitIDs != nil }
+}
+
+extension String {
+    /// Reduces an annotation marker to its bare comparable name, matching the normalization used by
+    /// `TypeDeclaration.stereotype` (`@Entity`, `jakarta.persistence.Entity` → `entity`).
+    var normalizedAnnotation: String {
+        var name = trimmingCharacters(in: .whitespacesAndNewlines)
+        if name.hasPrefix("@") { name.removeFirst() }
+        if let paren = name.firstIndex(of: "(") { name = String(name[..<paren]) }
+        if let dot = name.lastIndex(of: ".") { name = String(name[name.index(after: dot)...]) }
+        return name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+}

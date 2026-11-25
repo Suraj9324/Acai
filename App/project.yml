@@ -1,0 +1,265 @@
+name: Acai
+options:
+  bundleIdPrefix: de.kraftsoftware
+  developmentLanguage: en
+  deploymentTarget:
+    iOS: "26.0"
+    macOS: "26.0"
+  createIntermediateGroups: true
+  fileTypes:
+    "icon":
+      file: true
+packages:
+  Acai:
+    path: ..
+  # Used by `GitFixtureRepository` — iOS's Foundation has no `Process`/`Pipe` to shell out to `git`.
+  SwiftGitX:
+    url: https://github.com/ibrahimcetin/SwiftGitX.git
+    from: 0.4.0
+settings:
+  base:
+    # Index-while-building has no use on a CI runner (no code navigation happens there).
+    COMPILER_INDEX_STORE_ENABLE: "NO"
+targets:
+  Acai-iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: iOS
+      # Localizes the bundle's own Info.plist keys, and is what puts `de.lproj`/`fr.lproj` into the
+      # app bundle — without them the system never hands the process a language other than English,
+      # so `AcaiApp`'s own catalog would never be consulted.
+      - path: Shared/InfoPlist.xcstrings
+      # App Intents resolves an intent's static strings from the main bundle only.
+      - path: Shared/AppIntents.xcstrings
+      # An App Shortcut's phrases are localized by their English text, in their own catalog.
+      - path: Shared/AppShortcuts.xcstrings
+    dependencies:
+      - package: Acai
+        product: AcaiApp
+      - target: AcaiWidget-iOS
+    info:
+      path: iOS/Info.plist
+      properties:
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        ITSAppUsesNonExemptEncryption: false
+        CFBundleDisplayName: Açaí
+        # `acai://project|codebase|diagram/<uuid>` — see `AppAddress`.
+        CFBundleURLTypes:
+          - CFBundleURLName: de.kraftsoftware.Acai
+            CFBundleURLSchemes: [acai]
+    settings:
+      base:
+        PRODUCT_NAME: Acai
+        PRODUCT_BUNDLE_IDENTIFIER: de.kraftsoftware.Acai
+        DEVELOPMENT_TEAM: TJSHMGE2VX
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_ENTITLEMENTS: Acai-iOS.entitlements
+    scheme:
+      gatherCoverageData: false
+
+  # A shell around `AcaiWidget`; `PRODUCT_MODULE_NAME` keeps its module from colliding with that library's.
+  AcaiWidget-iOS:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Widget
+      - path: Shared/InfoPlist.xcstrings
+    dependencies:
+      - package: Acai
+        product: AcaiWidget
+    info: &widgetInfo
+      path: Widget/Info.plist
+      properties:
+        CFBundleDisplayName: Açaí
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        ITSAppUsesNonExemptEncryption: false
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_NAME: AcaiWidget
+        PRODUCT_MODULE_NAME: AcaiWidgetExtension
+        PRODUCT_BUNDLE_IDENTIFIER: de.kraftsoftware.Acai.Widget
+        DEVELOPMENT_TEAM: TJSHMGE2VX
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "NO"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_ENTITLEMENTS: AcaiWidget-iOS.entitlements
+
+  AcaiWidget-macOS:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: Widget
+      - path: Shared/InfoPlist.xcstrings
+    dependencies:
+      - package: Acai
+        product: AcaiWidget
+    info: *widgetInfo
+    settings:
+      base:
+        PRODUCT_NAME: AcaiWidget
+        PRODUCT_MODULE_NAME: AcaiWidgetExtension
+        PRODUCT_BUNDLE_IDENTIFIER: de.kraftsoftware.Acai.Widget
+        DEVELOPMENT_TEAM: TJSHMGE2VX
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "NO"
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        CODE_SIGN_ENTITLEMENTS: AcaiWidget-macOS.entitlements
+
+  # The snapshot tests. Both platforms share one `AcaiUITests/` source tree; `Fixtures/` is a
+  # separate resources path so its fixtures get copied rather than compiled.
+  Acai-iOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: AcaiUITests
+        excludes:
+          - "Fixtures/**"
+          # Read directly off disk by `ScreenshotComparator`, not bundled (leaf-name collisions otherwise).
+          - "__Snapshots__/**"
+          # `ScreenshotComparator`'s recording output (never committed; see its own doc comment).
+          - "__RecordedSnapshots__/**"
+      - path: AcaiUITests/Fixtures
+        buildPhase: resources
+        type: folder
+    dependencies:
+      - target: Acai-iOS
+      - package: SwiftGitX
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.kraftsoftware.Acai.UITests
+        DEVELOPMENT_TEAM: TJSHMGE2VX
+        SWIFT_VERSION: "6.0"
+        # Signing needs an Info.plist this target lacked.
+        GENERATE_INFOPLIST_FILE: YES
+
+  Acai-macOSUITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources:
+      - path: AcaiUITests
+        excludes:
+          - "Fixtures/**"
+          # Read directly off disk by `ScreenshotComparator`, not bundled (leaf-name collisions otherwise).
+          - "__Snapshots__/**"
+          # `ScreenshotComparator`'s recording output (never committed; see its own doc comment).
+          - "__RecordedSnapshots__/**"
+      - path: AcaiUITests/Fixtures
+        buildPhase: resources
+        type: folder
+    dependencies:
+      - target: Acai-macOS
+      - package: SwiftGitX
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.kraftsoftware.Acai.UITests
+        DEVELOPMENT_TEAM: TJSHMGE2VX
+        SWIFT_VERSION: "6.0"
+        # Signing needs an Info.plist this target lacked.
+        GENERATE_INFOPLIST_FILE: YES
+        # Extends Xcode's auto-generated entitlements with `/private/tmp` write access for fixture staging.
+        CODE_SIGN_ENTITLEMENTS: AcaiUITests-macOS.entitlements
+
+  Acai-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - path: macOS
+      - path: Shared/InfoPlist.xcstrings
+      - path: Shared/AppIntents.xcstrings
+      - path: Shared/AppShortcuts.xcstrings
+    dependencies:
+      - package: Acai
+        product: AcaiApp
+      - target: AcaiWidget-macOS
+    info:
+      path: macOS/Info.plist
+      properties:
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        LSMinimumSystemVersion: "$(MACOSX_DEPLOYMENT_TARGET)"
+        NSHighResolutionCapable: true
+        ITSAppUsesNonExemptEncryption: false
+        CFBundleDisplayName: Açaí
+        LSApplicationCategoryType: "public.app-category.developer-tools"
+        # `acai://project|codebase|diagram/<uuid>` — see `AppAddress`.
+        CFBundleURLTypes:
+          - CFBundleURLName: de.kraftsoftware.Acai
+            CFBundleURLSchemes: [acai]
+    settings:
+      base:
+        PRODUCT_NAME: Acai
+        PRODUCT_BUNDLE_IDENTIFIER: de.kraftsoftware.Acai
+        DEVELOPMENT_TEAM: TJSHMGE2VX
+        SWIFT_VERSION: "6.0"
+        GENERATE_INFOPLIST_FILE: "NO"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+      # App Sandbox: the shipping app, unlike the UI-test runner (which already had its own
+      # entitlements file), had none until now. Split per config: Debug additionally grants
+      # `/private/tmp` write access so the sandboxed app-under-test can persist into an
+      # XCUITest fixture directory (see `Acai-macOS-Debug.entitlements`'s own comment) —
+      # Release keeps the tighter `Acai-macOS.entitlements` with no such exception.
+      configs:
+        Debug:
+          CODE_SIGN_ENTITLEMENTS: Acai-macOS-Debug.entitlements
+        Release:
+          CODE_SIGN_ENTITLEMENTS: Acai-macOS.entitlements
+    scheme:
+      gatherCoverageData: false
+
+# XcodeGen's per-target `scheme:` shorthand doesn't register test targets as testable, so declared explicitly.
+schemes:
+  Acai-iOSUITests:
+    build:
+      targets:
+        Acai-iOSUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - Acai-iOSUITests
+  Acai-macOSUITests:
+    build:
+      targets:
+        Acai-macOSUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - Acai-macOSUITests
+  AcaiPackageTests-iOS:
+    build:
+      targets:
+        Acai-iOS: [test]
+    test:
+      config: Debug
+      targets:
+        - package: Acai/AcaiCoreTests
+        - package: Acai/AcaiAppModelTests
+        - package: Acai/AcaiAppTests
+        - package: Acai/AcaiWidgetTests

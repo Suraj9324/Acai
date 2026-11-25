@@ -1,0 +1,133 @@
+import Testing
+import CoreGraphics
+@testable import AcaiRender
+@testable import AcaiCore
+import AcaiQuality
+
+@Suite("Diagram Layout Model Tests")
+struct DiagramLayoutModelTests {
+
+    private func sampleArtifact() -> CodeArtifact {
+        CodeArtifact(
+            metadata: .init(sourceLanguage: .swift, filePaths: ["Sources/A/Animal.swift", "Sources/A/Dog.swift"]),
+            types: [
+                TypeDeclaration(
+                    id: "Animal", name: "Animal", qualifiedName: "Animal", kind: .class,
+                    accessLevel: .public,
+                    members: [Member(name: "name", kind: .property,
+                        accessLevel: .internal, type: TypeReference(name: "String"))],
+                    location: SourceLocation(filePath: "Sources/A/Animal.swift", line: 1, column: 1)
+                ),
+                TypeDeclaration(
+                    id: "Dog", name: "Dog", qualifiedName: "Dog", kind: .class,
+                    accessLevel: .public,
+                    location: SourceLocation(filePath: "Sources/A/Dog.swift", line: 1, column: 1)
+                )
+            ],
+            relationships: [Relationship(kind: .inheritance, source: "Dog", target: "Animal")]
+        )
+    }
+
+    @Test func buildsNodesAndEdges() {
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: .init())
+        #expect(model.nodes.count == 2)
+        #expect(model.edges.count == 1)
+        #expect(model.edges.first?.kind == .inheritance)
+    }
+
+    @Test func relationshipsHiddenWhenDisabled() {
+        var config = ClassDiagramConfiguration()
+        config.showRelationships = false
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        #expect(model.edges.isEmpty)
+    }
+
+    @Test func layoutAssignsAPositionToEveryNode() {
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: .init())
+        let sizes = Dictionary(
+            uniqueKeysWithValues: model.nodes.map { ($0.id, DiagramLayoutModel.estimateSize(for: $0)) }
+        )
+        let positions = model.performLayout(sizes: sizes)
+        #expect(positions.count == model.nodes.count)
+        for node in model.nodes {
+            #expect(positions[node.id] != nil)
+        }
+    }
+
+    @Test func estimateSizeIsPositive() {
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: .init())
+        for node in model.nodes {
+            let size = DiagramLayoutModel.estimateSize(for: node)
+            #expect(size.width > 0)
+            #expect(size.height > 0)
+        }
+    }
+
+    @Test func directoryGroupingProducesBoxes() {
+        var config = ClassDiagramConfiguration()
+        config.grouping = .directory
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        let sizes = Dictionary(
+            uniqueKeysWithValues: model.nodes.map { ($0.id, DiagramLayoutModel.estimateSize(for: $0)) }
+        )
+        let positions = model.performLayout(sizes: sizes)
+        let boxes = model.groupingBoxes(positions: positions, sizes: sizes)
+        #expect(!boxes.isEmpty)
+    }
+
+    /// `titleScale` reserves proportionally more space above a box as it grows, so `GroupingBoxView`'s
+    /// title tab — sized to match a caller's Dynamic Type scale — never draws over its own top row of
+    /// nodes (#203). The default (`1`) matches the CLI/export renderers, which have no such concept.
+    @Test func groupingBoxInsetGrowsWithTitleScale() throws {
+        var config = ClassDiagramConfiguration()
+        config.grouping = .directory
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        let sizes = Dictionary(
+            uniqueKeysWithValues: model.nodes.map { ($0.id, DiagramLayoutModel.estimateSize(for: $0)) }
+        )
+        let positions = model.performLayout(sizes: sizes)
+
+        let defaultBox = try #require(model.groupingBoxes(positions: positions, sizes: sizes).first)
+        let scaledBox = try #require(
+            model.groupingBoxes(positions: positions, sizes: sizes, titleScale: 3).first { $0.id == defaultBox.id }
+        )
+        #expect(scaledBox.rect.width > defaultBox.rect.width)
+        #expect(scaledBox.rect.height > defaultBox.rect.height)
+    }
+
+    @Test func noGroupingProducesNoBoxes() {
+        var config = ClassDiagramConfiguration()
+        config.grouping = .none
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        let boxes = model.groupingBoxes(positions: [:], sizes: [:])
+        #expect(boxes.isEmpty)
+    }
+
+    // MARK: - Selector filter
+
+    @Test func nilFilterShowsEveryType() {
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: .init())
+        #expect(model.nodes.count == 2)
+    }
+
+    @Test func filterKeepsOnlyMatchingTypes() {
+        var config = ClassDiagramConfiguration()
+        config.filter = AcaiQuality.Selector(typeGlob: "Dog")
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        #expect(model.nodes.map(\.id) == ["Dog"])
+    }
+
+    @Test func filterDropsRelationshipsToFilteredOutTypes() {
+        var config = ClassDiagramConfiguration()
+        config.filter = AcaiQuality.Selector(typeGlob: "Dog")
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        #expect(model.edges.isEmpty)
+    }
+
+    @Test func filterMatchingNothingProducesNoNodes() {
+        var config = ClassDiagramConfiguration()
+        config.filter = AcaiQuality.Selector(typeGlob: "NoSuchType")
+        let model = DiagramLayoutModel(artifact: sampleArtifact(), configuration: config)
+        #expect(model.nodes.isEmpty)
+    }
+}

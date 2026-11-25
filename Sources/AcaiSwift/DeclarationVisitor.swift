@@ -1,0 +1,312 @@
+import SwiftSyntax
+import AcaiCore
+
+final class DeclarationVisitor: SyntaxVisitor {
+    private let sourceLocations: SourceLocationResolver
+    /// The file's completed declarations; a type still being walked lives on `typeStack` until its
+    /// `visitPost`, so nesting is derived from the stack rather than the builder's namespace.
+    var declarations = DeclarationBuilder()
+    var typeStack: [TypeDeclaration] = []
+
+    /// How many function/initializer bodies we're currently inside. > 0 means collect call sites
+    /// instead of treating nested declarations as new members.
+    private var functionBodyDepth = 0
+    /// Each same-file protocol's requirement properties (`var x: T { get }`), keyed by protocol name —
+    /// a protocol extension's default implementation calling through one of these otherwise can't
+    /// resolve, since the property lives on the protocol, not the extension's own member list.
+    let protocolProperties: [String: [String: String]]
+
+    private let typeDeclarations: TypeDeclarationExtractor
+    private let relationships = RelationshipExtractor()
+    private let members: MemberExtractor
+    let signatures = DeclarationSignatureExtractor()
+    let scope: CallSiteTracker
+
+    /// `knownTypeNames` are the simple names of every type declared in the file, seeded up front so
+    /// `TypeName.method()` static calls resolve regardless of declaration order, including
+    /// forward-declared siblings.
+    init(
+        sourceLocations: SourceLocationResolver, knownTypeNames: Set<String> = [],
+        builtInTypeNames: Set<String> = [], protocolProperties: [String: [String: String]] = [:]
+    ) {
+        self.sourceLocations = sourceLocations
+        self.protocolProperties = protocolProperties
+        self.typeDeclarations = TypeDeclarationExtractor(sourceLocations: sourceLocations)
+        self.members = MemberExtractor(knownTypeNames: knownTypeNames, sourceLocations: sourceLocations)
+        self.scope = CallSiteTracker(
+            knownTypeNames: knownTypeNames, builtInTypeNames: builtInTypeNames, sourceLocations: sourceLocations)
+        declarations.declaredTypeNames = knownTypeNames
+        super.init(viewMode: .sourceAccurate)
+    }
+
+    func buildArtifact() -> CodeArtifact {
+        var completed = declarations
+        if !scope.topLevelCallSites.isEmpty {
+            completed.freestandingFunctions.append(Member(
+                name: "<top-level>", kind: .method, accessLevel: .public, callSites: scope.topLevelCallSites))
+        }
+        return completed.artifact(language: .swift, filePath: sourceLocations.fileName)
+    }
+
+    // MARK: - Type Declarations
+
+    override func visit(_ node: ClassDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractClass(from: node, namespace: currentNamespace)
+        pushType(typeDecl, memberBlock: node.memberBlock)
+        declarations.relationships.append(contentsOf: relationships.extract(from: node, typeId: typeDecl.id))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: ClassDeclSyntax) {
+        guard functionBodyDepth == 0 else { return }
+        popType()
+    }
+
+    override func visit(_ node: StructDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractStruct(from: node, namespace: currentNamespace)
+        pushType(typeDecl, memberBlock: node.memberBlock)
+        declarations.relationships.append(contentsOf: relationships.extract(from: node, typeId: typeDecl.id))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: StructDeclSyntax) {
+        guard functionBodyDepth == 0 else { return }
+        popType()
+    }
+
+    override func visit(_ node: EnumDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractEnum(from: node, namespace: currentNamespace)
+        pushType(typeDecl, memberBlock: node.memberBlock)
+        declarations.relationships.append(contentsOf: relationships.extract(from: node, typeId: typeDecl.id))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: EnumDeclSyntax) {
+        guard functionBodyDepth == 0 else { return }
+        popType()
+    }
+
+    override func visit(_ node: ProtocolDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractProtocol(from: node, namespace: currentNamespace)
+        pushType(typeDecl, memberBlock: node.memberBlock)
+        declarations.relationships.append(contentsOf: relationships.extract(from: node, typeId: typeDecl.id))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: ProtocolDeclSyntax) {
+        guard functionBodyDepth == 0 else { return }
+        // Protocol requirements inherit the protocol's access level, not their own modifier.
+        let access = typeStack[typeStack.count - 1].accessLevel
+        for index in typeStack[typeStack.count - 1].members.indices {
+            typeStack[typeStack.count - 1].members[index].accessLevel = access
+        }
+        popType()
+    }
+
+    override func visit(_ node: ExtensionDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractExtension(from: node, namespace: currentNamespace)
+        pushType(typeDecl, memberBlock: node.memberBlock)
+        declarations.relationships.append(contentsOf: relationships.extract(from: node, typeId: typeDecl.id))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: ExtensionDeclSyntax) {
+        guard functionBodyDepth == 0 else { return }
+        popType()
+    }
+
+    override func visit(_ node: TypeAliasDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractTypeAlias(from: node, namespace: currentNamespace)
+        if typeStack.isEmpty {
+            declarations.types.append(typeDecl)
+        } else {
+            typeStack[typeStack.count - 1].nestedTypes.append(typeDecl)
+        }
+        return .skipChildren
+    }
+
+    override func visit(_ node: ActorDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else { return .skipChildren }
+        let typeDecl = typeDeclarations.extractActor(from: node, namespace: currentNamespace)
+        pushType(typeDecl, memberBlock: node.memberBlock)
+        declarations.relationships.append(contentsOf: relationships.extract(from: node, typeId: typeDecl.id))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: ActorDeclSyntax) {
+        guard functionBodyDepth == 0 else { return }
+        popType()
+    }
+
+    // MARK: - Members
+
+    override func visit(_ node: FunctionDeclSyntax) -> SyntaxVisitorContinueKind {
+        // Balance the depth counter against `visitPost` even for nested functions, or the counter
+        // underflows and every later declaration is silently dropped.
+        let isNested = functionBodyDepth > 0
+        functionBodyDepth += 1
+        if isNested {
+            scope.mergeNestedFunctionParameters(from: node.signature.parameterClause)
+            return .visitChildren
+        }
+        scope.resetCallSiteState(
+            propertyMap: buildPropertyMap(), arrayElementPropertyMap: buildArrayElementPropertyMap(),
+            parameterClause: node.signature.parameterClause, fieldReadScope: fieldReadScope(of: node))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: FunctionDeclSyntax) {
+        functionBodyDepth -= 1
+        guard functionBodyDepth == 0 else { return }
+        var member = members.extractFunction(
+            from: node, callSites: scope.callSiteState.pendingCallSites,
+            assignments: scope.callSiteState.pendingAssignments, fieldReads: scope.callSiteState.pendingFieldReads)
+        member.deferredFieldReads = scope.callSiteState.pendingDeferredFieldReads.nonEmpty
+        if let body = node.body {
+            member.referencedTypeNames = scope.callSites.referencedTypes(in: body)
+        }
+        scope.clearCallSiteState()
+        if typeStack.isEmpty {
+            declarations.freestandingFunctions.append(member)
+        } else {
+            typeStack[typeStack.count - 1].members.append(member)
+        }
+    }
+
+    override func visit(_ node: OptionalBindingConditionSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth > 0 else { return .visitChildren }
+        scope.beginConditionBinding(node)
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: OptionalBindingConditionSyntax) {
+        guard functionBodyDepth > 0 else { return }
+        scope.endConditionBinding()
+    }
+
+    override func visit(_ node: VariableDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0 else {
+            scope.beginLocalBindings(node.bindings)
+            return .visitChildren
+        }
+        var extractedMembers = attachingInitializerReferencedTypes(
+            to: members.extractVariable(from: node), from: node)
+        // A binding is either stored or computed, never both, so unconditional attachment is safe.
+        let bodies = analysingPropertyBodies(of: node)
+        extractedMembers = extractedMembers.map(bodies.applied(to:))
+        if typeStack.isEmpty {
+            scope.recordTopLevelGlobalReceiverOrigins(from: node.bindings)
+            declarations.globalVariables.append(contentsOf: extractedMembers)
+        } else {
+            typeStack[typeStack.count - 1].members.append(contentsOf: extractedMembers)
+        }
+        return .skipChildren
+    }
+
+    override func visitPost(_ node: VariableDeclSyntax) {
+        guard functionBodyDepth == 0 else {
+            scope.endLocalBindings()
+            return
+        }
+    }
+
+    override func visit(_ node: InitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        let isNested = functionBodyDepth > 0
+        functionBodyDepth += 1
+        guard !isNested, !typeStack.isEmpty else { return .skipChildren }
+        scope.resetCallSiteState(
+            propertyMap: buildPropertyMap(), arrayElementPropertyMap: buildArrayElementPropertyMap(),
+            parameterClause: node.signature.parameterClause, fieldReadScope: fieldReadScope(of: node))
+        return .visitChildren
+    }
+
+    override func visitPost(_ node: InitializerDeclSyntax) {
+        functionBodyDepth -= 1
+        guard functionBodyDepth == 0, !typeStack.isEmpty else { return }
+        var member = members.extractInitializer(
+            from: node, callSites: scope.callSiteState.pendingCallSites,
+            assignments: scope.callSiteState.pendingAssignments, fieldReads: scope.callSiteState.pendingFieldReads)
+        member.deferredFieldReads = scope.callSiteState.pendingDeferredFieldReads.nonEmpty
+        if let body = node.body {
+            member.referencedTypeNames = scope.callSites.referencedTypes(in: body)
+        }
+        scope.clearCallSiteState()
+        typeStack[typeStack.count - 1].members.append(member)
+    }
+
+    override func visit(_ node: DeinitializerDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0, !typeStack.isEmpty else { return .skipChildren }
+        let member = members.extractDeinitializer(from: node)
+        typeStack[typeStack.count - 1].members.append(member)
+        return .skipChildren
+    }
+
+    override func visit(_ node: SubscriptDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0, !typeStack.isEmpty else { return .skipChildren }
+        let member = members.extractSubscript(from: node)
+        typeStack[typeStack.count - 1].members.append(member)
+        return .skipChildren
+    }
+
+    override func visit(_ node: EnumCaseDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0, !typeStack.isEmpty else { return .skipChildren }
+        let cases = members.extractEnumCases(from: node)
+        typeStack[typeStack.count - 1].enumCases.append(contentsOf: cases)
+        return .skipChildren
+    }
+
+    override func visit(_ node: AssociatedTypeDeclSyntax) -> SyntaxVisitorContinueKind {
+        guard functionBodyDepth == 0, !typeStack.isEmpty else { return .skipChildren }
+        typeStack[typeStack.count - 1].associatedTypes.append(
+            signatures.extractAssociatedType(from: node))
+        return .skipChildren
+    }
+
+    // MARK: - Conditional Compilation
+
+    override func visit(_ node: IfConfigDeclSyntax) -> SyntaxVisitorContinueKind {
+        // Walk only the first clause to avoid double-counting declarations across #if/#else branches;
+        // without build settings, the first (#if) is the closest approximation of the active one.
+        if let firstClause = node.clauses.first {
+            walk(firstClause)
+        }
+        return .skipChildren
+    }
+
+    // MARK: - Call-Site & Assignment Collection
+
+    override func visit(_ node: FunctionCallExprSyntax) -> SyntaxVisitorContinueKind {
+        scope.recordCallSite(
+            from: node, scope: functionBodyDepth > 0 ? .functionBody : (typeStack.isEmpty ? .fileScope : .other),
+            enclosingTypeName: typeStack.last?.name, topLevelGlobalPropertyMap: topLevelGlobalPropertyMap())
+        return .visitChildren
+    }
+
+    override func visit(_ node: SubscriptCallExprSyntax) -> SyntaxVisitorContinueKind {
+        scope.recordSubscriptCallSite(
+            from: node, scope: functionBodyDepth > 0 ? .functionBody : (typeStack.isEmpty ? .fileScope : .other),
+            enclosingTypeName: typeStack.last?.name, topLevelGlobalPropertyMap: topLevelGlobalPropertyMap())
+        return .visitChildren
+    }
+
+    override func visit(_ node: SequenceExprSyntax) -> SyntaxVisitorContinueKind {
+        if functionBodyDepth > 0 {
+            scope.recordAssignment(from: node)
+        }
+        return .visitChildren
+    }
+
+    override func visit(_ node: DeclReferenceExprSyntax) -> SyntaxVisitorContinueKind {
+        if functionBodyDepth > 0 {
+            scope.recordFieldReadAndMethodReference(from: node)
+        }
+        return .visitChildren
+    }
+
+}

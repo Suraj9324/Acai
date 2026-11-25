@@ -1,0 +1,57 @@
+/// The enum-case inventory of a codebase: every enum-like type with its cases, raw values and
+/// associated-value shapes, each carrying its `SourceLocation` for a precise jump target. The
+/// read-only view the CLI's `enums` command and downstream tooling render.
+public struct EnumInventory: Sendable {
+    public struct Entry: Codable, Equatable, Sendable {
+        public var type: String
+        /// The declaration's own documentation as prose. `nil` when it carries none.
+        public var documentation: String?
+        public var location: SourceLocation?
+        public var cases: [Case]
+    }
+
+    public struct Case: Codable, Equatable, Sendable {
+        public var name: String
+        public var rawValue: String?
+        public var associatedValues: [String]
+        /// The case's own documentation as prose. `nil` when it carries none.
+        public var documentation: String?
+    }
+
+    private let artifact: CodeArtifact
+
+    public init(artifact: CodeArtifact) {
+        self.artifact = artifact
+    }
+
+    /// Every enum-like type (any type that declares cases), sorted by qualified name for deterministic
+    /// output.
+    public var entries: [Entry] {
+        artifact.flattened()
+            .filter { !$0.enumCases.isEmpty }
+            .map { type in
+                Entry(
+                    type: type.qualifiedName,
+                    documentation: type.documentation,
+                    location: type.location,
+                    cases: type.enumCases.map { $0.inventoryDescription })
+            }
+            .sorted { $0.type < $1.type }
+    }
+}
+
+extension EnumCase {
+    /// This case rendered for the enum inventory: its name, raw value, and associated values as
+    /// `label: Type` (or bare `Type` when unlabelled).
+    var inventoryDescription: EnumInventory.Case {
+        EnumInventory.Case(
+            name: name,
+            rawValue: rawValue,
+            associatedValues: associatedValues.map { parameter in
+                let type = parameter.type?.name ?? "_"
+                let label = parameter.externalName ?? parameter.internalName
+                return label.isEmpty || label == "_" ? type : "\(label): \(type)"
+            },
+            documentation: documentation)
+    }
+}

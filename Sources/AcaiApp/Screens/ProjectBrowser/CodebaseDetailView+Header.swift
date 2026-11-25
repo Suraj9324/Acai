@@ -1,0 +1,239 @@
+import AcaiGit
+import SwiftUI
+
+extension CodebaseDetailView {
+
+    // MARK: - Header
+
+    /// A single crowded row works on iPad/macOS, but on iPhone the title (icon + name + subtitle)
+    /// and the actions (index status + branch picker/Pull, or Reindex) don't both fit — so compact
+    /// width gets its own actions row underneath instead of squeezing everything into one line.
+    func headerSection(codebase: Codebase) -> some View {
+        VStack(alignment: .leading, spacing: .spacingM) {
+            Group {
+                if horizontalSizeClass == .compact {
+                    VStack(alignment: .leading, spacing: .spacingM) {
+                        headerTitleRow(codebase: codebase)
+                        headerActionsRow(codebase: codebase)
+                    }
+                } else {
+                    HStack {
+                        headerTitleRow(codebase: codebase)
+                        Spacer()
+                        headerActionsRow(codebase: codebase)
+                    }
+                }
+            }
+            CodebaseInterruptedBanner(
+                activityCenter: model.store.activityCenter,
+                codebaseID: codebaseID,
+                phase: { phase(resuming: $0) },
+                resume: { resume($0) },
+                staleBanner: {
+                    if model.showsStaleBanner(codebaseID: codebaseID) {
+                        staleBanner(codebase: codebase)
+                    }
+                }
+            )
+        }
+        .padding()
+        .task(id: FreshnessCheckToken(codebaseID: codebaseID, lastIndexed: codebase.lastIndexed)) {
+            await model.ensureFreshnessLoaded(codebaseID: codebaseID)
+        }
+        .task(id: freshnessRecheckTrigger) {
+            await model.refreshFreshness(codebaseID: codebaseID)
+        }
+        .onAppear {
+            freshnessRecheckTrigger += 1
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            guard newPhase == .active else { return }
+            freshnessRecheckTrigger += 1
+        }
+    }
+
+    private func phase(resuming work: InterruptedOperationRecord.CodebaseWork) -> AsyncOperationPhase {
+        switch work {
+        case .reindex:
+            reindexPhase
+        case .pull:
+            pullPhase
+        case .switchRef:
+            refSwitchPhase
+        case .exportAtlas:
+            atlasExportPhase
+        }
+    }
+
+    private func resume(_ work: InterruptedOperationRecord.CodebaseWork) {
+        switch work {
+        case .reindex:
+            startReindex(codebaseID: codebaseID)
+        case .pull:
+            startPull(codebaseID: codebaseID)
+        case .switchRef(let ref, let refKind):
+            startRefSwitch(codebaseID: codebaseID, to: GitCheckout.Ref(name: ref, kind: refKind))
+        case .exportAtlas:
+            startAtlasExport(codebaseID: codebaseID)
+        }
+    }
+
+    private func startAtlasExport(codebaseID: UUID) {
+        atlasExportPhase = .loading(.app("View.CodebaseDetailView.ExportingAtlas"))
+        Task {
+            let outcome = await model.exportAtlas(for: codebaseID)
+            atlasExportPhase = AsyncOperationPhase(outcome, failure: .app("View.CodebaseDetailView.AtlasExportFailed"))
+        }
+    }
+
+    /// The reindex path the interrupted banner, the stale banner and the actions row share.
+    private func startReindex(codebaseID: UUID) {
+        reindexPhase = .loading(.app("View.CodebaseDetailView.Indexing"))
+        Task {
+            let outcome = await model.editing.reindex(codebaseID: codebaseID)
+            reindexPhase = AsyncOperationPhase(outcome, failure: .app("View.CodebaseDetailView.IndexingFailed"))
+        }
+    }
+
+    private struct FreshnessCheckToken: Equatable {
+        let codebaseID: UUID
+        let lastIndexed: Date?
+    }
+
+    private func staleBanner(codebase: Codebase) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            Label(.app("View.CodebaseDetailView.AnalysisOutOfDate"), systemImage: "exclamationmark.triangle.fill")
+                .font(.subheadline)
+                .foregroundStyle(.orange)
+            Spacer()
+            Button {
+                startReindex(codebaseID: codebase.id)
+            } label: {
+                Label(.app("View.CodebaseDetailView.Reindex"), systemImage: "arrow.clockwise")
+            }
+            .disabled(reindexPhase.isInFlight)
+            .accessibilityIdentifier("codebaseDetail.staleBanner.reindexButton")
+            AsyncOperationStatusView(identifierPrefix: "codebaseDetail.staleBanner.reindex", phase: reindexPhase)
+        }
+        .padding(.spacingS)
+        .background(Color.orange.opacity(0.12))
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .accessibilityIdentifier("codebaseDetail.staleBanner")
+    }
+
+    private func headerTitleRow(codebase: Codebase) -> some View {
+        HStack {
+            Image(systemName: "folder")
+                .font(.title)
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .background(Color.gray.opacity(0.1))
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: .spacingXS) {
+                TextField(text: Binding(
+                    get: { codebase.name },
+                    set: { model.editing.updateCodebase(id: codebase.id, name: $0) }
+                )) {
+                    Text(.app("View.CodebaseDetailView.CodebaseName"))
+                }
+                .font(.title2.bold())
+                .textFieldStyle(.plain)
+                .accessibilityIdentifier("codebaseDetail.nameField")
+
+                if codebase.managedCheckout != nil, let repository = codebase.repository {
+                    Text(verbatim: "\(repository.remoteDisplayName) @ \(repository.ref)")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                } else {
+                    Text(verbatim: (codebase.directoryPath as NSString).abbreviatingWithTildeInPath)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+                if let revision = codebase.pinnedRevision {
+                    pinnedRevisionCaption(revision: revision)
+                }
+            }
+        }
+    }
+
+    private func headerActionsRow(codebase: Codebase) -> some View {
+        HStack {
+            indexStatus(codebase: codebase)
+            if horizontalSizeClass == .compact {
+                Spacer()
+            }
+            if artifact != nil {
+                inspectButton(codebase: codebase)
+                if codebase.guidedRoute != .offered {
+                    guidedRouteButton(codebase: codebase)
+                }
+            }
+            if codebase.managedCheckout != nil, let repository = codebase.repository {
+                managedCheckoutActions(codebase: codebase, repository: repository)
+            } else {
+                localRevisionPicker(codebase: codebase)
+                Button {
+                    startReindex(codebaseID: codebase.id)
+                } label: {
+                    Label(.app("View.CodebaseDetailView.Reindex"), systemImage: "arrow.clockwise")
+                }
+                .disabled(reindexPhase.isInFlight)
+                .accessibilityIdentifier("codebaseDetail.reindexButton")
+                AsyncOperationStatusView(identifierPrefix: "codebaseDetail.reindex", phase: reindexPhase)
+            }
+            AsyncOperationStatusView(identifierPrefix: "codebaseDetail.atlasExport", phase: atlasExportPhase)
+        }
+        // On the row itself, not on the picker: until the refs load the picker renders nothing, and a
+        // task attached to nothing never runs.
+        .task(id: codebase.id) {
+            guard codebase.managedCheckout == nil else { return }
+            await loadLocalRevisions(codebase: codebase)
+        }
+    }
+
+    /// Opens `InspectView`, scoped to this codebase.
+    private func inspectButton(codebase: Codebase) -> some View {
+        Button {
+            model.selection = .inspect(codebase.id)
+        } label: {
+            Label(.app("View.CodebaseDetailView.Inspect"), systemImage: "magnifyingglass")
+        }
+        .accessibilityIdentifier("codebaseDetail.inspectButton")
+    }
+
+    private func guidedRouteButton(codebase: Codebase) -> some View {
+        Button {
+            model.editing.setGuidedRoute(.offered, codebaseID: codebase.id)
+        } label: {
+            Label(.app("View.CodebaseDetailView.GuidedRoute"), systemImage: "map")
+        }
+        .accessibilityIdentifier("codebaseDetail.guidedRouteButton")
+    }
+
+    private func indexStatus(codebase: Codebase) -> some View {
+        VStack(alignment: .trailing, spacing: .spacingXXS) {
+            if let date = codebase.lastIndexed {
+                let formatted = date.formatted(date: .abbreviated, time: .shortened)
+                Text(.app("View.CodebaseDetailView.LastIndexed \(formatted)"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if codebase.hasParseErrors {
+                Label(
+                    .app("View.CodebaseDetailView.SyntaxIssues \(codebase.parseDiagnosticCount)"),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .help(.app("View.CodebaseDetailView.SomeFilesCouldNot"))
+            }
+        }
+    }
+}

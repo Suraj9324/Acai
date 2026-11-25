@@ -1,0 +1,25 @@
+import MCP
+import AcaiLibrary
+
+/// `acai_metrics` — the full static-analysis metric set. Mirrors `acai metrics --format json`.
+struct MetricsTool: AnalysisTool {
+    let name = "acai_metrics"
+    let description = """
+        Compute static-analysis metrics: per-module coupling and instability, and per-type fan-in/out, \
+        weighted methods, inheritance depth, cohesion (LCOM), data-class scores and physical lines of \
+        code. Use to find god classes and coupling hotspots when planning a refactor.
+        """
+
+    var inputSchema: Value { objectSchema(extraProperties: generatedScopeProperty) }
+
+    func run(arguments: ToolArguments, cache: AnalysisSnapshotCache) async throws -> ToolOutput {
+        let artifact = try await analysisArtifact(arguments, cache)
+        let payload = Payload(metrics: artifact.computeMetrics(), health: HealthCheck(artifact: artifact).summary)
+        return .json(try Value(payload))
+    }
+
+    private struct Payload: Codable {
+        var metrics: CodeMetrics
+        var health: HealthCheck.Summary
+    }
+}

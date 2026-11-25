@@ -1,0 +1,141 @@
+import AcaiCore
+import AcaiDiff
+
+extension ArtifactDiff {
+    func humanReport() -> String {
+        if isEmpty { return "No structural changes." }
+
+        var sections: [String] = []
+
+        if !addedTypes.isEmpty {
+            sections.append(ReportSection(title: "Added types", lines: addedTypes.map { "+ \($0)" }).text)
+        }
+        if !removedTypes.isEmpty {
+            sections.append(ReportSection(title: "Removed types", lines: removedTypes.map { "- \($0)" }).text)
+        }
+        if !changedTypes.isEmpty {
+            sections.append(ReportSection(title: "Changed types", lines: changedTypes.map(\.reportLine)).text)
+        }
+
+        var edgeLines: [String] = []
+        edgeLines += addedRelationships.map { "+ " + $0.reportPhrase() }
+        edgeLines += removedRelationships.map { "- " + $0.reportPhrase(removed: true) }
+        edgeLines += changedRelationships.map { "~ " + $0.after.reportPhrase() + " (multiplicity/label changed)" }
+        if !edgeLines.isEmpty {
+            sections.append(ReportSection(title: "Relationship changes", lines: edgeLines).text)
+        }
+
+        if !functions.isEmpty {
+            sections.append(ReportSection(title: "Free function changes", lines: functions.reportLines).text)
+        }
+        if !globals.isEmpty {
+            sections.append(ReportSection(title: "Global variable changes", lines: globals.reportLines).text)
+        }
+
+        let metricLines = moduleMetricDeltas.compactMap(\.reportLine)
+        if !metricLines.isEmpty {
+            sections.append(ReportSection(title: "Module metric changes", lines: metricLines).text)
+        }
+
+        let typeMetricLines = typeMetricDeltas.compactMap(\.reportLine)
+        if !typeMetricLines.isEmpty {
+            sections.append(ReportSection(title: "Type metric changes", lines: typeMetricLines).text)
+        }
+
+        return sections.joined(separator: "\n\n") + "\n"
+    }
+}
+
+private struct ReportSection {
+    let title: String
+    let lines: [String]
+
+    var text: String {
+        ([title + ":"] + lines.map { "  " + $0 }).joined(separator: "\n")
+    }
+}
+
+private extension MemberDelta {
+    var reportLines: [String] {
+        added.map { "+ \($0)" }
+            + removed.map { "- \($0)" }
+            + changed.map { "~ \($0.before) → \($0.after)" }
+    }
+}
+
+private extension TypeChange {
+    var reportLine: String {
+        var parts: [String] = []
+        if let kind = kindChange {
+            parts.append("\(kind.before.rawValue) → \(kind.after.rawValue)")
+        }
+        if let access = accessChange {
+            parts.append("access \(access.before.rawValue) → \(access.after.rawValue)")
+        }
+        if !addedMembers.isEmpty { parts.append("+\(addedMembers.count) member(s)") }
+        if !removedMembers.isEmpty { parts.append("-\(removedMembers.count) member(s)") }
+        if !changedMembers.isEmpty { parts.append("~\(changedMembers.count) member(s)") }
+        return "~ \(id): \(parts.joined(separator: ", "))"
+    }
+}
+
+private extension ModuleMetricDelta {
+    var reportLine: String? {
+        var parts: [String] = []
+        if let d = distanceFromMainSequence { parts.append("distance \(d.twoDecimalArrow)") }
+        if let i = instability { parts.append("instability \(i.twoDecimalArrow)") }
+        if let a = abstractness { parts.append("abstractness \(a.twoDecimalArrow)") }
+        guard !parts.isEmpty else { return nil }
+        return "\(module): \(parts.joined(separator: ", "))"
+    }
+}
+
+private extension TypeMetricDelta {
+    var reportLine: String? {
+        var parts: [String] = []
+        if let f = fanIn { parts.append("fan-in \(f.before) → \(f.after)") }
+        if let f = fanOut { parts.append("fan-out \(f.before) → \(f.after)") }
+        if let d = depthOfInheritance { parts.append("DIT \(d.before) → \(d.after)") }
+        guard !parts.isEmpty else { return nil }
+        return "\(id): \(parts.joined(separator: ", "))"
+    }
+}
+
+private extension Relationship {
+    func reportPhrase(removed: Bool = false) -> String {
+        let source = self.source.lastDottedComponent
+        let target = self.target.lastDottedComponent
+        if removed {
+            switch kind {
+            case .inheritance:
+                return "\(source)→\(target) inheritance removed"
+            case .conformance:
+                return "\(source) no longer conforms to \(target)"
+            default:
+                return "\(source) no longer depends on \(target) (\(kind.rawValue))"
+            }
+        }
+        switch kind {
+        case .inheritance:
+            return "\(source) now inherits from \(target)"
+        case .conformance:
+            return "\(source) now conforms to \(target)"
+        case .composition, .aggregation:
+            return "\(source) now owns \(target) (\(kind.rawValue))"
+        default:
+            return "\(source) now depends on \(target) (\(kind.rawValue))"
+        }
+    }
+}
+
+private extension String {
+    var lastDottedComponent: String { components(separatedBy: ".").last ?? self }
+}
+
+private extension Double {
+    var twoDecimals: String { String(format: "%.2f", self) }
+}
+
+private extension Change where T == Double {
+    var twoDecimalArrow: String { "\(before.twoDecimals) → \(after.twoDecimals)" }
+}

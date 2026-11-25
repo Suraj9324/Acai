@@ -1,0 +1,154 @@
+import Foundation
+import AcaiCore
+
+// MARK: - Diagram Node
+
+public struct GeneratedDiagramNode: Identifiable, Sendable {
+    public let id: String
+    public let name: String
+    public let kind: TypeKind
+    public let stereotype: String?
+    public let properties: [DiagramMember]
+    public let methods: [DiagramMember]
+    public let enumCases: [DiagramEnumCase]
+    public let genericParameters: [String]
+    /// The type's own documentation as prose. `nil` when it carries none.
+    public let documentation: String?
+    /// e.g. `Sources/AcaiCore/ClassDiagram`.
+    public let directoryPath: String?
+    /// `<project>/<module>` when the folder holds several projects, so the grouped layout boxes each project.
+    public let productGroup: String?
+
+    public init(
+        from type: TypeDeclaration,
+        configuration: ClassDiagramConfiguration? = nil,
+        annotationStereotypes: [String: String] = [:],
+        collectionTypeNames: Set<String> = [],
+        varianceKeywords: [Variance: String],
+        modules: ModuleMap
+    ) {
+        let config = configuration ?? .init()
+
+        self.id = type.id
+        self.name = type.name
+        self.kind = type.kind
+        self.stereotype = type.stereotype(
+            annotationStereotypes: config.showAnnotationStereotypes ? annotationStereotypes : [:]
+        )
+        self.genericParameters = type.genericParameters
+            .map { $0.umlDisplayString(varianceKeywords: varianceKeywords) }
+        self.documentation = type.documentation
+
+        let accessFilter = config.minimumAccessLevel
+
+        let props = type.members.filter(\.isProperty)
+        let meths = type.members.filter(\.isMethod)
+
+        let showProps = config.propertyVisibility[type.id] ?? config.showProperties
+        let showMeths = config.methodVisibility[type.id] ?? config.showMethods
+        let showEnums = config.enumCaseVisibility[type.id] ?? config.showEnumCases
+
+        if showProps {
+            self.properties = props
+                .filter { Self.passesAccessFilter($0.accessLevel, minimum: accessFilter) }
+                .map { DiagramMember(from: $0, isMethod: false, collectionTypeNames: collectionTypeNames) }
+        } else {
+            self.properties = []
+        }
+
+        if showMeths {
+            self.methods = meths
+                .filter { Self.passesAccessFilter($0.accessLevel, minimum: accessFilter) }
+                .map { DiagramMember(from: $0, isMethod: true, collectionTypeNames: collectionTypeNames) }
+        } else {
+            self.methods = []
+        }
+
+        if showEnums {
+            self.enumCases = type.enumCases.map { DiagramEnumCase(from: $0) }
+        } else {
+            self.enumCases = []
+        }
+
+        if let filePath = type.location?.filePath {
+            let dirComponents = filePath.split(separator: "/").dropLast().map(String.init)
+            self.directoryPath = dirComponents.isEmpty ? nil : dirComponents.joined(separator: "/")
+            self.productGroup = modules.module(forFilePath: filePath)
+        } else {
+            self.directoryPath = nil
+            self.productGroup = nil
+        }
+    }
+
+    /// Uses the `AccessLevel.visibilityRank` ordering shared with the DOT/Mermaid renderers.
+    public static func passesAccessFilter(_ access: AccessLevel, minimum: AccessLevel?) -> Bool {
+        guard let minimum else { return true }
+        return access.visibilityRank >= minimum.visibilityRank
+    }
+}
+
+// MARK: - Diagram Member
+
+public struct DiagramMember: Identifiable, Sendable {
+    public let id: String
+    public let accessSymbol: String
+    public let accessLevel: AccessLevel
+    public let name: String
+    public let displayText: String
+    public let isStatic: Bool
+    public let isAbstract: Bool
+
+    public init(from member: Member, isMethod: Bool, collectionTypeNames: Set<String> = []) {
+        self.id = "\(member.name)_\(member.kind.rawValue)_\(member.type?.name ?? "")"
+        self.accessSymbol = member.umlAccessSymbol
+        self.accessLevel = member.accessLevel
+        self.name = member.name
+        self.isStatic = member.modifiers.contains(.static) || member.modifiers.contains(.class)
+        self.isAbstract = member.modifiers.contains(.abstract)
+
+        self.displayText = isMethod
+            ? member.umlMethodLine(collectionTypeNames: collectionTypeNames)
+            : member.umlPropertyLine(collectionTypeNames: collectionTypeNames)
+    }
+}
+
+extension DiagramMember {
+    public var displayItem: MemberDisplayItem {
+        MemberDisplayItem(
+            id: id, text: displayText, isStatic: isStatic, isAbstract: isAbstract, accessLevel: accessLevel)
+    }
+}
+
+// MARK: - Diagram Enum Case
+
+public struct DiagramEnumCase: Identifiable, Sendable {
+    public let id: String
+    public let displayText: String
+
+    public init(from enumCase: EnumCase) {
+        self.id = enumCase.name
+        self.displayText = enumCase.umlCaseLine
+    }
+}
+
+// MARK: - Diagram Edge
+
+public struct GeneratedDiagramEdge: Identifiable, Sendable {
+    public let id: String
+    public let sourceID: String
+    public let targetID: String
+    public let kind: Relationship.Kind
+    /// Multiplicity shown at the source (tail) end, e.g. `1` / `0..1` / `*`, or `nil`.
+    public let sourceLabel: String?
+    /// Multiplicity shown at the target (head) end, e.g. `1` / `0..1` / `*`, or `nil`.
+    public let targetLabel: String?
+
+    public init(from rel: Relationship, showMultiplicities: Bool = true) {
+        self.id = "\(rel.source)-\(rel.kind.rawValue)-\(rel.target)"
+        self.sourceID = rel.source
+        self.targetID = rel.target
+        self.kind = rel.kind
+        self.sourceLabel = showMultiplicities ? rel.sourceLabel : nil
+        self.targetLabel = showMultiplicities ? rel.targetLabel : nil
+    }
+}

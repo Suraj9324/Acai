@@ -1,0 +1,48 @@
+import Foundation
+import AcaiCore
+import AcaiDiagram
+
+/// Converts a package diagram into an editable freeform diagram: each module becomes a UML
+/// `.package` node (the same shape the generated view shows) and every cross-module dependency a
+/// dependency edge. Coupling metrics aren't carried over — a hand-edited package diagram has no
+/// analysis behind it.
+struct PackageFreeformConversion: FreeformConversion {
+    let context: FreeformConversionContext
+    private let package: PackageDiagram
+
+    init(context: FreeformConversionContext) {
+        self.context = context
+        self.package = PackageDiagramBuilder(filter: context.diagram.packageDiagramFilter).build(
+            from: context.artifact.enriched(using: context.artifact.standardLanguageResolver))
+    }
+
+    func items() -> [PackageDiagram.Node] {
+        package.nodes
+    }
+
+    func sourceID(for item: PackageDiagram.Node) -> String {
+        item.id
+    }
+
+    func defaultPosition(index: Int) -> CGPoint {
+        CGPoint(x: CGFloat(index) * 200 + 120, y: 120)
+    }
+
+    func makeNode(for item: PackageDiagram.Node, id: String, position: CGPoint) -> FreeformDiagram.Node {
+        FreeformDiagram.Node(
+            id: id,
+            name: item.name,
+            content: .package,
+            positionX: Double(position.x),
+            positionY: Double(position.y)
+        )
+    }
+
+    func makeEdges(idsBySourceID: [String: String]) -> [FreeformDiagram.Edge] {
+        package.edges.compactMap { edge in
+            guard let source = idsBySourceID[edge.from],
+                  let target = idsBySourceID[edge.to] else { return nil }
+            return FreeformDiagram.Edge(sourceNodeID: source, targetNodeID: target, kind: .dependency)
+        }
+    }
+}

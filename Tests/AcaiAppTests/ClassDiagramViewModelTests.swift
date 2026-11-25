@@ -1,0 +1,226 @@
+import CoreGraphics
+import Testing
+import AcaiCore
+import AcaiRender
+@testable import AcaiApp
+
+@Suite("Class Diagram View Model")
+@MainActor
+struct ClassDiagramViewModelTests {
+
+    private func type(_ name: String, _ access: AccessLevel) -> TypeDeclaration {
+        TypeDeclaration(
+            id: name, name: name, qualifiedName: name, kind: .class,
+            accessLevel: access,
+            location: SourceLocation(filePath: "A.swift", line: 1, column: 1)
+        )
+    }
+
+    private func viewModel(
+        types: [TypeDeclaration],
+        configure: (inout ClassDiagramConfiguration) -> Void = { _ in }
+    ) -> ClassDiagramViewModel {
+        let artifact = CodeArtifact(
+            metadata: .init(sourceLanguage: .swift, filePaths: ["A.swift"]),
+            types: types
+        )
+        var config = ClassDiagramConfiguration()
+        configure(&config)
+        return ClassDiagramViewModel(
+            codebase: Codebase(name: "c", directoryPath: "/tmp"),
+            artifact: artifact,
+            configuration: config
+        )
+    }
+
+    @Test func typesBelowMinimumAccessAreHidden() {
+        let vm = viewModel(
+            types: [type("Pub", .public), type("Inter", .internal), type("Priv", .private)]
+        ) { $0.minimumAccessLevel = .public }
+        #expect(Set(vm.nodes.map(\.id)) == ["Pub"])
+    }
+
+    @Test func allTypesShownWhenNoMinimum() {
+        let vm = viewModel(types: [type("Pub", .public), type("Inter", .internal)])
+        #expect(Set(vm.nodes.map(\.id)) == ["Pub", "Inter"])
+    }
+
+    private func type(_ name: String, file: String) -> TypeDeclaration {
+        TypeDeclaration(
+            id: name, name: name, qualifiedName: name, kind: .class, accessLevel: .public,
+            location: SourceLocation(filePath: file, line: 1, column: 1)
+        )
+    }
+
+    @Test func groupingBoxesNestPerDirectoryLevelAndEmptyWhenUngrouped() {
+        let types = [type("A", file: "Sources/Foo/A.swift"), type("B", file: "Sources/Bar/B.swift")]
+        let directory = viewModel(types: types) { $0.grouping = .directory }
+        // One outer box for `Sources`, plus one for each of `Sources/Foo` and `Sources/Bar`.
+        let boxes = directory.groupingBoxes
+        #expect(boxes.count == 3)
+        #expect(boxes.filter { $0.depth == 1 }.map(\.label) == ["Sources"])
+        #expect(Set(boxes.filter { $0.depth == 2 }.map(\.label)) == ["Foo", "Bar"])
+        let ungrouped = viewModel(types: types) { $0.grouping = .none }
+        #expect(ungrouped.groupingBoxes.isEmpty)
+    }
+
+    // MARK: - Search (#183)
+
+    @Test func emptyQueryMatchesNothingAndHasNoCurrentNode() {
+        let vm = viewModel(types: [type("Base", .public), type("Derived", .public)])
+        #expect(vm.searchMatchIDs.isEmpty)
+        #expect(vm.currentSearchNodeID == nil)
+    }
+
+    @Test func queryMatchesByNameCaseInsensitively() {
+        let vm = viewModel(types: [type("Base", .public), type("Derived", .public), type("Helper", .public)])
+        vm.searchQuery = "base"
+        #expect(vm.searchMatchIDs == ["Base"])
+        #expect(vm.currentSearchNodeID == "Base")
+    }
+
+    @Test func steppingWrapsForwardAndBackwardThroughMatches() {
+        let vm = viewModel(types: [type("Base", .public), type("Derived", .public), type("Helper", .public)])
+        vm.searchQuery = "e"
+        let matches = vm.searchMatchIDs
+        #expect(matches.count == 3)
+        #expect(vm.currentSearchNodeID == matches[0])
+
+        vm.stepSearchForward()
+        #expect(vm.currentSearchNodeID == matches[1])
+        vm.stepSearchForward()
+        vm.stepSearchForward()
+        // One more step past the last match wraps back to the first one.
+        #expect(vm.currentSearchNodeID == matches[0])
+
+        vm.stepSearchBackward()
+        vm.stepSearchBackward()
+        #expect(vm.currentSearchNodeID == matches[1])
+    }
+
+    @Test func newQueryResetsToFirstMatch() {
+        let vm = viewModel(types: [
+            type("Alpha", .public), type("Beta", .public), type("Gamma", .public), type("Delta", .public)
+        ])
+        vm.searchQuery = "a"
+        vm.stepSearchForward()
+        #expect(vm.currentSearchNodeID == "Beta")
+
+        // A new query with a *different* match count than the previous step index would land on
+        // (here: 2 matches, but the stepped index was 1) proves the index actually reset to 0
+        // rather than surviving by coincidence.
+        vm.searchQuery = "e"
+        #expect(vm.searchMatchIDs == ["Beta", "Delta"])
+        #expect(vm.currentSearchNodeID == "Beta")
+    }
+
+    /// Dismissing find is a search-state-only reset: it must not disturb the diagram the user was
+    /// looking at, including anything they had selected or dragged.
+    @Test func dismissClearsQueryAndMatches() {
+        let vm = viewModel(types: [type("Base", .public), type("Derived", .public)])
+        vm.updateMeasuredSizes([
+            "Base": CGSize(width: 200, height: 100), "Derived": CGSize(width: 200, height: 100)
+        ])
+        vm.selectNode("Base", extending: false)
+        vm.moveNode("Derived", to: CGPoint(x: 321, y: 123))
+        let nodeIDs = vm.nodes.map(\.id)
+        let nodePositions = vm.nodePositions
+        let selectedNodeIDs = vm.selectedNodeIDs
+
+        vm.searchQuery = "Base"
+        #expect(!vm.searchMatchIDs.isEmpty)
+
+        vm.dismissSearch()
+        #expect(vm.searchQuery.isEmpty)
+        #expect(vm.searchMatchIDs.isEmpty)
+        #expect(vm.currentSearchNodeID == nil)
+        #expect(vm.nodes.map(\.id) == nodeIDs)
+        #expect(vm.nodePositions == nodePositions)
+        #expect(vm.selectedNodeIDs == selectedNodeIDs)
+        #expect(vm.nodePositions["Derived"] == CGPoint(x: 321, y: 123))
+        #expect(vm.selectedNodeIDs == ["Base"])
+    }
+
+    @Test func steppingWithNoMatchesIsANoOp() {
+        let vm = viewModel(types: [type("Base", .public)])
+        vm.searchQuery = "nonexistent"
+        vm.stepSearchForward()
+        vm.stepSearchBackward()
+        #expect(vm.currentSearchNodeID == nil)
+    }
+
+    // MARK: - Dynamic Type relayout (#203)
+
+    /// `updateMeasuredSizes` only re-runs layout once per invalidation (so a user's dragged
+    /// positions aren't fought on every minor re-measurement) — but without `updateDynamicTypeSize`
+    /// resetting that latch, a text-size change that grows a node's rendered box after the first
+    /// layout would leave every position computed for the old, smaller box, overlapping neighbours.
+    @Test func dynamicTypeSizeChangeAllowsOneMoreRelayoutAfterGrowth() {
+        let types = [type("A", .public), type("B", .public)]
+        let artifact = CodeArtifact(
+            metadata: .init(sourceLanguage: .swift),
+            types: types,
+            relationships: [Relationship(kind: .association, source: "B", target: "A")]
+        )
+        let vm = ClassDiagramViewModel(codebase: Codebase(name: "c", directoryPath: "/tmp"), artifact: artifact)
+
+        // The first measured pass (as SwiftUI reports on initial render) performs the one-shot layout.
+        vm.updateMeasuredSizes(["A": CGSize(width: 200, height: 100), "B": CGSize(width: 200, height: 100)])
+        let positionsAfterFirstMeasurement = vm.nodePositions
+
+        // Growth from here on is absorbed into the box but doesn't move anything — the one-shot
+        // latch already fired, so positions computed for the smaller box are left in place.
+        vm.updateMeasuredSizes(["A": CGSize(width: 200, height: 260)])
+        #expect(vm.nodePositions == positionsAfterFirstMeasurement)
+        #expect(vm.effectiveSize(for: "A").height == 260)
+
+        // A Dynamic Type size change resets the latch, so the next measurement — now reflecting the
+        // larger rendered box — is allowed to relayout again instead of leaving stale positions
+        // under a box that grew out from under them.
+        vm.updateDynamicTypeSize(.accessibility5)
+        vm.updateMeasuredSizes(["A": CGSize(width: 200, height: 400)])
+        #expect(vm.nodePositions != positionsAfterFirstMeasurement)
+    }
+
+    /// `groupingBoxes` reserves space above each box for `GroupingBoxView`'s title tab — that space
+    /// has to grow with `currentDynamicTypeSize`, or a larger tab draws over the top row of its own
+    /// nodes (#203's group-label overlap).
+    @Test func groupingBoxInsetGrowsWithDynamicTypeSize() throws {
+        let vm = viewModel(types: [type("A", file: "Sources/Foo/A.swift")]) { $0.grouping = .directory }
+
+        let widthAtDefaultSize = try #require(vm.groupingBoxes.first).rect.width
+        vm.updateDynamicTypeSize(.accessibility5)
+        let widthAtAccessibilitySize = try #require(vm.groupingBoxes.first).rect.width
+
+        #expect(widthAtAccessibilitySize > widthAtDefaultSize)
+    }
+
+    /// `dependents(for:)` must reuse `ImpactAnalysis` rather than a reimplementation — this pins
+    /// its behavior (transitive, root excluded) through the view model rather than the engine type.
+    @Test func dependentsReflectsTransitiveImpactAnalysis() {
+        let types = [type("A", .public), type("B", .public), type("C", .public)]
+        let artifact = CodeArtifact(
+            metadata: .init(sourceLanguage: .swift),
+            types: types,
+            relationships: [
+                Relationship(kind: .association, source: "B", target: "A"),
+                Relationship(kind: .association, source: "C", target: "B")
+            ]
+        )
+        let vm = ClassDiagramViewModel(codebase: Codebase(name: "c", directoryPath: "/tmp"), artifact: artifact)
+        #expect(vm.dependents(for: "A").map(\.id) == ["B", "C"])
+        #expect(vm.dependents(for: "C").isEmpty)
+    }
+
+    // MARK: - Image Export
+
+    @Test func exportsNonEmptyPNGData() throws {
+        let vm = viewModel(types: [type("A", .public), type("B", .public)])
+        // Nodes need a laid-out size before there is anything to rasterise.
+        vm.updateMeasuredSizes(["A": CGSize(width: 200, height: 100), "B": CGSize(width: 200, height: 100)])
+
+        let data = try vm.exportPNGData(scale: 1)
+        // A valid PNG starts with the 8-byte signature.
+        #expect(data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+    }
+}

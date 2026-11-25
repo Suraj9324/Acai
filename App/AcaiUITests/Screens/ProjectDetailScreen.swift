@@ -1,0 +1,126 @@
+import XCTest
+
+@MainActor
+final class ProjectDetailScreen {
+    let app: XCUIApplication
+
+    init(app: XCUIApplication) {
+        self.app = app
+    }
+
+    /// An empty project on regular width offers the action twice — once in the toolbar, once in the
+    /// empty state — under two identifiers. Either performs it, so match whichever is on screen.
+    var addCodebaseButton: XCUIElement { eitherPlacement(of: "addCodebaseButton") }
+    var addDiagramButton: XCUIElement { eitherPlacement(of: "addDiagramButton") }
+
+    private func eitherPlacement(of action: String) -> XCUIElement {
+        app.buttons.matching(NSPredicate(
+            format: "identifier IN %@", ["projectDetail.\(action)", "projectDetail.emptyState.\(action)"]
+        )).firstMatch
+    }
+    var findingsButton: XCUIElement { app.buttons["projectDetail.findingsButton"] }
+    var emptyState: XCUIElement { app.descendants(matching: .any)["projectDetail.emptyState"] }
+
+    /// The compact-width (iPhone) "+" toolbar button; never exists on regular width.
+    var addMenuButton: XCUIElement { app.buttons["projectDetail.addMenuButton"] }
+
+    func tapAddCodebase(file: StaticString = #filePath, line: UInt = #line) {
+        tapAddMenuItem(addCodebaseButton, description: "Add Codebase", file: file, line: line)
+    }
+
+    /// Clones the fixture repository's preselected default branch and waits for the row it names `expecting`.
+    func addFixtureGitHubCodebase(
+        expecting name: String = "fixture-repo", file: StaticString = #filePath, line: UInt = #line
+    ) {
+        tapAddCodebase(file: file, line: line)
+        GitHubAccountScreen(app: app).selectGitHubSource(file: file, line: line)
+        let sheet = NewCodebaseSheetScreen(app: app)
+        sheet.choose("octocat/fixture-repo", from: sheet.repositoryPicker, file: file, line: line)
+        sheet.cloneButton.waitUntilEnabled("Clone, once the default branch is preselected", file: file, line: line)
+        sheet.clone(file: file, line: line)
+        codebaseRow(named: name).waitOrFail("the cloned codebase \(name)", file: file, line: line)
+    }
+
+    func tapAddDiagram(file: StaticString = #filePath, line: UInt = #line) {
+        tapAddMenuItem(addDiagramButton, description: "Add Diagram", file: file, line: line)
+    }
+
+    func openFindings(file: StaticString = #filePath, line: UInt = #line) {
+        tapAddMenuItem(findingsButton, description: "Findings", file: file, line: line)
+    }
+
+    /// Regular width shows these actions directly; compact width hides them behind "+".
+    private func tapAddMenuItem(_ item: XCUIElement, description: String, file: StaticString, line: UInt) {
+        if SnapshotPlatform().usesCompactLayout {
+            addMenuButton.tap("the \"+\" menu", until: item, file: file, line: line)
+        }
+        item.tapWhenReady(description, file: file, line: line)
+    }
+
+    /// Only meaningful on compact width. Opening a `Menu` has no side effect, so this may retry.
+    /// There is deliberately no counterpart to close it: the open menu's items sit over the "+"
+    /// button and the screen edge is the home indicator's, so no tap reliably dismisses it — a
+    /// journey that opens it ends there.
+    func openAddMenu(file: StaticString = #filePath, line: UInt = #line) {
+        addMenuButton.tap("the \"+\" menu", until: addCodebaseButton, file: file, line: line)
+    }
+
+    /// `.firstMatch`: this identifier can resolve to more than one accessibility node for a
+    /// system-styled `.confirmationDialog` action; any one of them performs the same tap.
+    var deleteCodebaseConfirmButton: XCUIElement {
+        app.buttons.matching(identifier: "projectDetail.codebase.delete.confirmButton").firstMatch
+    }
+
+    func codebaseRow(id: String) -> XCUIElement {
+        app.descendants(matching: .any)["projectDetail.codebaseRow.\(id)"]
+    }
+
+    /// Per-row in-flight state: present in place of the checkmark/dashed-circle while a
+    /// reindex/fetch/clone concerning this codebase is running — see `CodebaseIndexStatusBadge`.
+    func codebaseIndexingSpinner(id: String) -> XCUIElement {
+        app.descendants(matching: .any)["codebaseRow.indexingSpinner.\(id)"]
+    }
+
+    /// A clone an earlier launch never finished, keyed by its interruption record's id.
+    func interruptedClone(id: String) -> XCUIElement {
+        app.descendants(matching: .any)["projectDetail.interruptedClone.\(id)"]
+    }
+
+    func interruptedCloneRetryButton(id: String) -> XCUIElement {
+        app.buttons["projectDetail.interruptedClone.\(id).retryButton"]
+    }
+
+    func dismissInterruptedClone(id: String, file: StaticString = #filePath, line: UInt = #line) {
+        app.buttons["projectDetail.interruptedClone.\(id).dismissButton"]
+            .tapWhenReady("the interrupted clone's Dismiss button", file: file, line: line)
+        interruptedClone(id: id).waitForDisappearanceOrFail("the dismissed interrupted clone", file: file, line: line)
+    }
+
+    func freeformDiagramRow(id: String) -> XCUIElement {
+        app.descendants(matching: .any)["projectDetail.freeformDiagramRow.\(id)"]
+    }
+
+    #if os(macOS)
+    /// Waits for the diagram to show in the window it opened, which becomes the frontmost one.
+    func openFreeformDiagramInNewWindow(id: String, file: StaticString = #filePath, line: UInt = #line) {
+        // Window-scoped: the File menu's own "Open in New Window" item also matches an unscoped query.
+        let openInNewWindow = app.windows.firstMatch.descendants(matching: .any)["Open in New Window"]
+        freeformDiagramRow(id: id)
+            .reveal("the freeform diagram's row", until: openInNewWindow, file: file, line: line) { $0.rightClick() }
+        openInNewWindow.tapWhenReady("the row's Open in New Window action", file: file, line: line)
+        app.windows.firstMatch.descendants(matching: .any)["diagram.checkpointsButton"]
+            .waitOrFail("the freeform diagram in its own window", file: file, line: line)
+    }
+    #endif
+
+    var deleteProjectButton: XCUIElement { app.buttons["projectDetail.deleteProjectButton"] }
+    var deleteProjectConfirmButton: XCUIElement {
+        app.buttons.matching(identifier: "projectDetail.project.delete.confirmButton").firstMatch
+    }
+
+    /// For a codebase added at test runtime (e.g. cloned from GitHub), whose `id` is a fresh random
+    /// UUID the test can't predict ahead of time — matches the row's visible name label instead.
+    func codebaseRow(named name: String) -> XCUIElement {
+        app.staticTexts[name].firstMatch
+    }
+}

@@ -1,0 +1,186 @@
+import AcaiGit
+import SwiftUI
+
+extension CodebaseDetailView {
+
+    // MARK: - Managed checkout
+
+    @ViewBuilder
+    func managedCheckoutActions(codebase: Codebase, repository: CodebaseRepositoryReference) -> some View {
+        let refKind = codebase.managedCheckout?.refKind ?? .branch
+        let current = GitCheckout.Ref(name: repository.ref, kind: refKind)
+        if isShallowClone {
+            latestSnapshotBadge(remoteURL: repository.remoteURL)
+        }
+        Picker(.app("View.CodebaseDetailView.BranchTag"), selection: Binding(
+            get: { current.id },
+            set: { newID in
+                guard let selected = (availableRefs + [current]).first(where: { $0.id == newID }),
+                      selected != current
+                else { return }
+                startRefSwitch(codebaseID: codebase.id, to: selected)
+            }
+        )) {
+            if !availableRefs.contains(current) {
+                Text(verbatim: current.name).tag(current.id)
+            }
+            ForEach(availableRefs) { ref in
+                Text(verbatim: ref.name).tag(ref.id)
+            }
+        }
+        .labelsHidden()
+        .frame(maxWidth: 160)
+        .disabled(refSwitchPhase.isInFlight)
+        .accessibilityIdentifier("codebaseDetail.refPicker")
+        .task(id: ManagedCheckoutToken(
+            remoteURL: repository.remoteURL, lastSynced: codebase.managedCheckout?.lastSyncedAt
+        )) {
+            await loadManagedCheckoutState(repository: repository)
+        }
+        AsyncOperationStatusView(identifierPrefix: "codebaseDetail.refSwitch", phase: refSwitchPhase)
+
+        Button {
+            startPull(codebaseID: codebase.id)
+        } label: {
+            Label(.app("View.CodebaseDetailView.Pull"), systemImage: "arrow.triangle.2.circlepath")
+        }
+        .disabled(pullPhase.isInFlight)
+        .accessibilityIdentifier("codebaseDetail.pullButton")
+        AsyncOperationStatusView(identifierPrefix: "codebaseDetail.pull", phase: pullPhase)
+    }
+
+    func startPull(codebaseID: UUID) {
+        pullPhase = .loading(.app("View.CodebaseDetailView.Pulling"))
+        Task {
+            let outcome = await model.editing.pull(codebaseID: codebaseID)
+            pullPhase = AsyncOperationPhase(outcome, failure: .app("View.CodebaseDetailView.PullFailed"))
+        }
+    }
+
+    func startRefSwitch(codebaseID: UUID, to ref: GitCheckout.Ref) {
+        refSwitchPhase = .loading(.app("View.CodebaseDetailView.SwitchingTo \(ref.name)"))
+        Task {
+            let outcome = await model.editing.switchRef(codebaseID: codebaseID, ref: ref.name, kind: ref.kind)
+            refSwitchPhase = AsyncOperationPhase(outcome, failure: .app("View.CodebaseDetailView.SwitchFailed"))
+        }
+    }
+
+    private struct ManagedCheckoutToken: Equatable {
+        let remoteURL: URL
+        let lastSynced: Date?
+    }
+
+    private func loadManagedCheckoutState(repository: CodebaseRepositoryReference) async {
+        let endpoint = RemoteEndpoint(remoteURL: repository.remoteURL, gitHubCredential: nil)
+        let hubStoreDirectory = model.store.gitRepositoriesDir
+        availableRefs = (try? await remoteService.refs(of: endpoint, hubStoreDirectory: hubStoreDirectory)) ?? []
+        isShallowClone = await remoteService.inspectClone(endpoint, hubStoreDirectory: hubStoreDirectory).isShallow
+    }
+
+    /// Says the clone carries only the latest snapshot, with the action that fetches the rest.
+    private func latestSnapshotBadge(remoteURL: URL) -> some View {
+        HStack(spacing: .spacingXS) {
+            Label(.app("View.CodebaseDetailView.LatestSnapshotOnly"), systemImage: "clock.badge.exclamationmark")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .help(.app("View.CodebaseDetailView.LatestSnapshotOnlyHelp"))
+                .accessibilityIdentifier("codebaseDetail.latestSnapshotBadge")
+            FetchFullHistoryButton(
+                remoteURL: remoteURL, phase: $fullHistoryPhase, identifierPrefix: "codebaseDetail.fullHistory"
+            ) {
+                isShallowClone = false
+            }
+        }
+    }
+
+    // MARK: - Local folder revision
+
+    /// Offered only when the folder is inside a git repository. Picking a revision reads it from the
+    /// repository's history; the folder and whatever is checked out in it are left alone.
+    @ViewBuilder
+    func localRevisionPicker(codebase: Codebase) -> some View {
+        if let localRevisions, !localRevisions.refs.isEmpty {
+            Picker(.app("View.CodebaseDetailView.AnalysedRevision"), selection: Binding(
+                get: { codebase.analysedRevision },
+                set: { revision in
+                    refSwitchPhase = .loading(.app("View.CodebaseDetailView.Indexing"))
+                    Task {
+                        let outcome = await model.editing.setAnalysedRevision(revision, codebaseID: codebase.id)
+                        refSwitchPhase = AsyncOperationPhase(
+                            outcome, failure: .app("View.CodebaseDetailView.IndexingFailed"))
+                    }
+                }
+            )) {
+                Text(.app("View.CodebaseDetailView.WorkingTree")).tag(String?.none)
+                if let pinned = codebase.analysedRevision,
+                   !localRevisions.refs.contains(where: { $0.name == pinned }) {
+                    Text(verbatim: pinned).tag(Optional(pinned))
+                }
+                ForEach(localRevisions.refs) { ref in
+                    Text(verbatim: ref.name).tag(Optional(ref.name))
+                }
+            }
+            .labelsHidden()
+            .frame(maxWidth: 160)
+            .disabled(refSwitchPhase.isInFlight)
+            .help(.app("View.CodebaseDetailView.AnalysedRevisionHelp"))
+            .accessibilityIdentifier("codebaseDetail.revisionPicker")
+            AsyncOperationStatusView(identifierPrefix: "codebaseDetail.revisionSwitch", phase: refSwitchPhase)
+        }
+    }
+
+    func pinnedRevisionCaption(revision: String) -> some View {
+        let checkedOut = localRevisions?.checkedOut ?? "—"
+        return Label(
+            .app("View.CodebaseDetailView.AnalysingRevision \(revision) \(checkedOut)"),
+            systemImage: "clock"
+        )
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .accessibilityIdentifier("codebaseDetail.pinnedRevisionCaption")
+    }
+
+    func loadLocalRevisions(codebase: Codebase) async {
+        let access = ScopedResourceAccess(path: codebase.directoryPath, bookmark: codebase.securityScopedBookmark)
+        let lister = LocalRevisionLister(checkouts: model.checkouts)
+        localRevisions = await Task.detached(priority: .utility) {
+            (try? access.withResolvedURL { lister.revisions(in: $0) }).flatMap { $0 }
+        }.value
+    }
+}
+
+/// Deepens a shallow clone. Shared by every surface that says history isn't available yet.
+struct FetchFullHistoryButton: View {
+    let remoteURL: URL
+    @Binding var phase: AsyncOperationPhase
+    let identifierPrefix: String
+    var onFetched: () -> Void = {}
+    @EnvironmentObject private var model: ProjectBrowserViewModel
+
+    var body: some View {
+        Button(action: fetch) {
+            Label(.app("View.FetchFullHistoryButton.FetchFullHistory"), systemImage: "clock.arrow.circlepath")
+        }
+        .disabled(phase.isInFlight)
+        .accessibilityIdentifier("\(identifierPrefix)Button")
+        .contextMenu {
+            Button(action: fetch) {
+                Label(.app("View.FetchFullHistoryButton.FetchFullHistory"), systemImage: "clock.arrow.circlepath")
+            }
+        }
+        AsyncOperationStatusView(identifierPrefix: identifierPrefix, phase: phase)
+    }
+
+    private func fetch() {
+        guard !phase.isInFlight else { return }
+        phase = .loading(.app("View.FetchFullHistoryButton.Fetching"))
+        Task {
+            if await model.editing.fetchFullHistory(remoteURL: remoteURL) {
+                phase = .loaded
+                onFetched()
+            } else {
+                phase = .failed(String(localized: .app("View.FetchFullHistoryButton.Failed")))
+            }
+        }
+    }
+}

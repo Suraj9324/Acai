@@ -1,0 +1,215 @@
+import CoreGraphics
+import Testing
+import AcaiCore
+import AcaiDiagram
+import AcaiRender
+import AcaiQuality
+@testable import AcaiApp
+
+@Suite("Package Diagram View Model")
+@MainActor
+struct PackageDiagramViewModelTests {
+
+    /// `ModuleA` (two classes) depends on `ModuleB` (one protocol) → two module nodes, one edge.
+    private func artifact() -> CodeArtifact {
+        CodeArtifact(
+            metadata: .init(sourceLanguage: .swift),
+            types: [
+                TypeDeclaration(
+                    id: "A", name: "A", qualifiedName: "A", kind: .class,
+                    accessLevel: .public,
+                    location: .init(filePath: "Sources/ModuleA/A.swift", line: 1, column: 1)
+                ),
+                TypeDeclaration(
+                    id: "A2", name: "A2", qualifiedName: "A2", kind: .class,
+                    accessLevel: .public,
+                    location: .init(filePath: "Sources/ModuleA/A2.swift", line: 1, column: 1)
+                ),
+                TypeDeclaration(
+                    id: "B", name: "B", qualifiedName: "B", kind: .protocol,
+                    accessLevel: .public,
+                    location: .init(filePath: "Sources/ModuleB/B.swift", line: 1, column: 1)
+                )
+            ],
+            relationships: [
+                Relationship(kind: .conformance, source: "A", target: "B"),
+                Relationship(kind: .dependency, source: "A2", target: "B")
+            ]
+        )
+    }
+
+    @Test func derivesModuleNodesAndEdgeFromArtifact() {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        #expect(Set(vm.diagram.nodes.map(\.name)) == ["ModuleA", "ModuleB"])
+        #expect(vm.diagram.edges.count == 1)
+    }
+
+    @Test func restoredPositionsSeedState() throws {
+        let id = try #require(PackageDiagramViewModel(artifact: artifact()).diagram.nodes.first?.id)
+        let vm = PackageDiagramViewModel(artifact: artifact(), restoredPositions: [id: CGPoint(x: 8, y: 9)])
+        #expect(vm.positionOverrides[id] == CGPoint(x: 8, y: 9))
+    }
+
+    @Test func moveNodeUpdatesOverrideAndResizeIsNoOp() throws {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        let id = try #require(vm.diagram.nodes.first?.id)
+        vm.moveNode(id, to: CGPoint(x: 12, y: 34))
+        #expect(vm.positionOverrides[id] == CGPoint(x: 12, y: 34))
+        vm.resizeNode(id, width: 999, height: 999)
+        #expect(vm.positionOverrides[id] == CGPoint(x: 12, y: 34))
+    }
+
+    @Test func selectionTogglesExtendsAndClears() throws {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        let ids = vm.diagram.nodes.map(\.id)
+        let first = try #require(ids.first)
+        let second = try #require(ids.dropFirst().first)
+        vm.selectNode(first, extending: false)
+        #expect(vm.selectedNodeIDs == [first])
+        vm.selectNode(second, extending: true)
+        #expect(vm.selectedNodeIDs == [first, second])
+        vm.selectNode(second, extending: true)
+        #expect(vm.selectedNodeIDs == [first])
+        vm.clearSelection()
+        #expect(vm.selectedNodeIDs.isEmpty)
+    }
+
+    @Test func selectAllAndMarqueeSelectEveryModule() {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        vm.selectAll()
+        #expect(vm.selectedNodeIDs == Set(vm.diagram.nodes.map(\.id)))
+
+        vm.clearSelection()
+        vm.selectNodes(in: CGRect(x: -10_000, y: -10_000, width: 20_000, height: 20_000))
+        #expect(vm.selectedNodeIDs == Set(vm.layout.nodes.map(\.id)))
+    }
+
+    @Test func historySnapshotMirrorsPositions() {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        vm.positionOverrides = ["ModuleA": CGPoint(x: 1, y: 2)]
+        #expect(vm.historySnapshot == ["ModuleA": CGPoint(x: 1, y: 2)])
+        vm.historySnapshot = ["ModuleB": CGPoint(x: 3, y: 4)]
+        #expect(vm.positionOverrides == ["ModuleB": CGPoint(x: 3, y: 4)])
+    }
+
+    @Test func filterKeepsOnlyMatchingModulesAndKeepsPositions() {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        vm.positionOverrides = ["ModuleA": CGPoint(x: 1, y: 2)]
+
+        vm.applyFilter(Selector(module: "ModuleA"))
+
+        #expect(vm.diagram.nodes.map(\.name) == ["ModuleA"])
+        #expect(vm.diagram.edges.isEmpty)
+        #expect(vm.positionOverrides == ["ModuleA": CGPoint(x: 1, y: 2)])
+        #expect(vm.filter == Selector(module: "ModuleA"))
+    }
+
+    @Test func clearingFilterRestoresEveryModule() {
+        let vm = PackageDiagramViewModel(artifact: artifact(), filter: Selector(module: "ModuleA"))
+        #expect(vm.diagram.nodes.map(\.name) == ["ModuleA"])
+
+        vm.applyFilter(nil)
+
+        #expect(Set(vm.diagram.nodes.map(\.name)) == ["ModuleA", "ModuleB"])
+    }
+
+    @Test func exportsNonEmptyPNGData() throws {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        let data = try vm.exportPNGData(scale: 1)
+        // A valid PNG starts with the 8-byte signature.
+        #expect(data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]))
+    }
+
+    // MARK: - Delta mode
+
+    /// `ModuleA.A` always depends on `ModuleB.B`; only the newer revision's `A` gained a `log`
+    /// method returning `ModuleC.C`, so that module and the edge into it are what the delta marks.
+    private func artifact(dependingOnModuleC: Bool) -> CodeArtifact {
+        let logMethod = Member(
+            name: "log", kind: .method, accessLevel: .public, type: TypeReference(name: "C"))
+        var types = [
+            TypeDeclaration(
+                id: "A", name: "A", qualifiedName: "A", kind: .class, accessLevel: .public,
+                members: dependingOnModuleC ? [logMethod] : [],
+                location: .init(filePath: "Sources/ModuleA/A.swift", line: 1, column: 1)
+            ),
+            TypeDeclaration(
+                id: "B", name: "B", qualifiedName: "B", kind: .protocol, accessLevel: .public,
+                location: .init(filePath: "Sources/ModuleB/B.swift", line: 1, column: 1)
+            )
+        ]
+        if dependingOnModuleC {
+            types.append(TypeDeclaration(
+                id: "C", name: "C", qualifiedName: "C", kind: .class, accessLevel: .public,
+                location: .init(filePath: "Sources/ModuleC/C.swift", line: 1, column: 1)
+            ))
+        }
+        return CodeArtifact(
+            metadata: .init(sourceLanguage: .swift),
+            types: types,
+            relationships: [Relationship(kind: .conformance, source: "A", target: "B")]
+        )
+    }
+
+    @Test func comparisonArtifactMarksAddedElements() throws {
+        let vm = PackageDiagramViewModel(
+            artifact: artifact(dependingOnModuleC: true),
+            comparisonArtifact: artifact(dependingOnModuleC: false))
+
+        #expect(vm.isDeltaMode)
+        let moduleC = try #require(vm.diagram.nodes.first { $0.name == "ModuleC" })
+        let moduleA = try #require(vm.diagram.nodes.first { $0.name == "ModuleA" })
+        let moduleB = try #require(vm.diagram.nodes.first { $0.name == "ModuleB" })
+
+        #expect(vm.nodeDeltaStatus(id: moduleC.id) == .added)
+        #expect(vm.nodeDeltaColor(id: moduleC.id) != nil)
+        #expect(vm.edgeDeltaColor(from: moduleA.id, to: moduleC.id) != nil)
+        // Everything the revisions share carries no badge and no tint.
+        #expect(vm.nodeDeltaStatus(id: moduleB.id) == nil)
+        #expect(vm.edgeDeltaColor(from: moduleA.id, to: moduleB.id) == nil)
+    }
+
+    @Test func noComparisonArtifactMeansNoDeltaStatus() throws {
+        let vm = PackageDiagramViewModel(artifact: artifact(dependingOnModuleC: true))
+        let moduleC = try #require(vm.diagram.nodes.first { $0.name == "ModuleC" })
+        #expect(!vm.isDeltaMode)
+        #expect(vm.nodeDeltaStatus(id: moduleC.id) == nil)
+        #expect(vm.nodeDeltaColor(id: moduleC.id) == nil)
+    }
+}
+
+// MARK: - Rotor plan
+
+extension PackageDiagramViewModelTests {
+    @Test("The rotor plan names every drawn module and dependency, and a comparison's additions are changed")
+    func rotorPlanMatchesTheCanvas() throws {
+        let vm = PackageDiagramViewModel(
+            artifact: artifact(dependingOnModuleC: true),
+            comparisonArtifact: artifact(dependingOnModuleC: false))
+        let layout = vm.layout
+        let moduleA = try #require(vm.diagram.nodes.first { $0.name == "ModuleA" })
+        let moduleB = try #require(vm.diagram.nodes.first { $0.name == "ModuleB" })
+        let moduleC = try #require(vm.diagram.nodes.first { $0.name == "ModuleC" })
+
+        let plan = vm.rotorPlan
+
+        #expect(Set(plan.elements.map(\.id)) == Set(layout.nodes.map(\.id)))
+        #expect(Set(plan.connections.map(\.id)) == Set(layout.edges.map(\.accessibilityID)))
+        let addedEdge = try #require(layout.edges.first { $0.from == moduleA.id && $0.to == moduleC.id })
+        let changed = Set(plan.changed.map(\.id))
+        #expect(changed.contains(moduleC.id))
+        #expect(changed.contains(addedEdge.accessibilityID))
+        #expect(!changed.contains(moduleB.id))
+    }
+
+    @Test("Selection and a drag tick reuse the rotor plan; a committed drag or an undo rebuilds it")
+    func rotorPlanIsCachedUntilTheLayoutChanges() throws {
+        let vm = PackageDiagramViewModel(artifact: artifact())
+        let first = try #require(vm.rotorPlan.elements.first?.id)
+
+        RotorPlanCachingCheck(model: vm) { $0.rotorPlan }.verify(moving: first, to: CGPoint(x: 5000, y: 5000))
+
+        vm.historySnapshot = [:]
+        #expect(vm.rotorPlan.elements.first?.id == first)
+    }
+}

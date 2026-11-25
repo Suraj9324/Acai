@@ -1,0 +1,281 @@
+import CoreGraphics
+import XCTest
+
+@MainActor
+class DiagramScreenBase {
+    let app: XCUIApplication
+
+    required init(app: XCUIApplication) {
+        self.app = app
+    }
+
+    var undoButton: XCUIElement { app.buttons["diagram.undoButton"] }
+    var redoButton: XCUIElement { app.buttons["diagram.redoButton"] }
+    var fitToViewButton: XCUIElement { app.buttons["diagram.fitToViewButton"] }
+    var sidebarToggleButton: XCUIElement { app.buttons["diagram.sidebarToggleButton"] }
+    /// Shown only on compact width (iPhone), where `.inspector(isPresented:)` collapses to a plain
+    /// sheet with no built-in dismiss chrome.
+    var sidebarDoneButton: XCUIElement { app.buttons["diagram.sidebarDoneButton"] }
+
+    // MARK: - Sidebar tabs (every generated diagram type has this Settings/Inspector split)
+
+    /// A plain `Picker(selection:)` with `.pickerStyle(.segmented)` surfaces its `Text` case labels
+    /// as its segments, not a custom identifier — and macOS exposes those segments as radio buttons
+    /// (confirmed in a failing run's element tree), iOS as buttons.
+    var settingsTabButton: XCUIElement { sidebarTab("Settings") }
+    var inspectorTabButton: XCUIElement { sidebarTab("Inspector") }
+
+    /// Matched by label without an identifier: the project browser's own `sidebar.settingsButton`
+    /// carries the label "Settings" too, and a query matching both throws on every property read.
+    private func sidebarTab(_ label: String) -> XCUIElement {
+        let segments: XCUIElementQuery
+        #if os(macOS)
+        segments = app.radioButtons
+        #else
+        segments = app.buttons
+        #endif
+        return segments.matching(NSPredicate(format: "label == %@ AND identifier == ''", label)).firstMatch
+    }
+    var settingsContent: XCUIElement { app.descendants(matching: .any)["diagram.sidebarContent.settings"] }
+    var inspectorContent: XCUIElement { app.descendants(matching: .any)["diagram.sidebarContent.inspector"] }
+
+    /// Precondition for reaching `relayoutButton`/`configureButton`/`saveAsFreeformButton`/
+    /// `exportImageButton`/any type-specific Settings control, all of which live in this tab.
+    func openSettingsTab(file: StaticString = #filePath, line: UInt = #line) {
+        openSidebarTab(settingsTabButton, content: settingsContent, name: "Settings", file: file, line: line)
+    }
+
+    /// Most journeys reach the Inspector by double-tapping a canvas element instead; this is for
+    /// the cases that need it without an element to double-tap yet.
+    func openInspectorTab(file: StaticString = #filePath, line: UInt = #line) {
+        openSidebarTab(inspectorTabButton, content: inspectorContent, name: "Inspector", file: file, line: line)
+    }
+
+    /// Call once the diagram's canvas is confirmed on screen — the sidebar renders in the same pass,
+    /// so its absence then really means it's closed.
+    private func openSidebarTab(
+        _ tab: XCUIElement, content: XCUIElement, name: String, file: StaticString, line: UInt
+    ) {
+        if content.exists { return }
+        if !settingsContent.exists && !inspectorContent.exists {
+            tapSidebarToggle(until: anySidebarContent, file: file, line: line)
+        }
+        // Opening the sidebar restores the tab it was last on, which is usually this one already.
+        if content.exists { return }
+        tab.tap("the sidebar's \(name) tab", until: content, file: file, line: line)
+    }
+
+    /// Re-layout (Class Diagram) / entry-point-or-scope Apply (Sequence, State, Call Graph) — call
+    /// `openSettingsTab()` first, these live in the Settings tab's `Form`, not the toolbar.
+    var relayoutButton: XCUIElement { app.buttons["diagram.relayoutButton"] }
+    var configureButton: XCUIElement { app.buttons["diagram.configureButton"] }
+    var saveAsFreeformButton: XCUIElement { app.buttons["diagram.saveAsFreeformButton"] }
+    var exportImageButton: XCUIElement { app.buttons["diagram.exportImageButton"] }
+    var backButton: XCUIElement { app.buttons["BackButton"] }
+
+    /// Opens the Settings tab and scrolls until `element` lies within the visible settings.
+    func revealInSettings(
+        _ element: XCUIElement, _ description: String, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        openSettingsTab(file: file, line: line)
+        #if os(macOS)
+        var wheelDirection: CGFloat = 1
+        var lastOffset: CGFloat?
+        #endif
+        for _ in 0..<8 {
+            SystemBanners().dismiss(file: file, line: line)
+            guard element.appears(within: .uiTransition / 8) else {
+                settingsContent.swipeUp()
+                continue
+            }
+            let visible = settingsContent.frame
+            let frame = element.frame
+            if visible.contains(frame) { return }
+            #if os(macOS)
+            // A swipe barely moves a macOS scroll view; the wheel reverses if it carried the element further away.
+            let offset = visible.midY - frame.midY
+            if let lastOffset, abs(offset) >= abs(lastOffset) { wheelDirection = -wheelDirection }
+            lastOffset = offset
+            settingsContent.scroll(byDeltaX: 0, deltaY: wheelDirection * offset)
+            #else
+            // Slow: a default swipe flings further than the visible height and overshoots both ways.
+            if frame.minY < visible.minY {
+                settingsContent.swipeDown(velocity: .slow)
+            } else {
+                settingsContent.swipeUp(velocity: .slow)
+            }
+            #endif
+        }
+        element.waitOrFail(description, file: file, line: line)
+        XCTAssertTrue(
+            settingsContent.frame.contains(element.frame), "\(description) stayed scrolled out of view",
+            file: file, line: line)
+    }
+
+    /// Taps exactly once — every tap creates another copy — and waits for the copy to open.
+    @discardableResult
+    func saveAsFreeform(file: StaticString = #filePath, line: UInt = #line) -> FreeformDiagramScreen {
+        revealInSettings(saveAsFreeformButton, "the Save as Freeform button", file: file, line: line)
+        saveAsFreeformButton.tapWhenReady("Save as Freeform", file: file, line: line)
+        settingsContent.waitForDisappearanceOrFail("the source diagram's Settings after saving", file: file, line: line)
+        let freeform = FreeformDiagramScreen(app: app)
+        freeform.openedIndicator.waitOrFail("the freeform copy", file: file, line: line)
+        return freeform
+    }
+
+    #if os(iOS)
+    /// UIKit's own identifier: one set on the activity controller's view isn't reliably in the tree.
+    var shareSheet: XCUIElement { app.otherElements["ActivityListView"] }
+
+    /// Taps exactly once and waits for the system share sheet the export hands its file to.
+    @discardableResult
+    func exportImage(file: StaticString = #filePath, line: UInt = #line) -> XCUIElement {
+        revealInSettings(exportImageButton, "the Export Image button", file: file, line: line)
+        exportImageButton.tapWhenReady("Export Image", file: file, line: line)
+        return shareSheet.waitOrFail("the share sheet for the exported image", file: file, line: line)
+    }
+    #endif
+
+    /// Falls back to iOS's "More" toolbar overflow item when the toolbar has collapsed the button into
+    /// it — macOS's `NSToolbar` never collapses into overflow, so that branch is iOS/iPadOS-only. One
+    /// query matching either element waits for whichever the toolbar rendered.
+    /// With a `destination`, an overflow item is re-tapped only while its menu is still open — a tap
+    /// landing while the menu is still presenting does nothing, and one that registered closes it.
+    func tapToolbarButton(
+        identifier: String, label: String, until destination: XCUIElement? = nil,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let button = app.buttons[identifier]
+        #if os(macOS)
+        button.tapWhenReady("toolbar button \(label)", file: file, line: line)
+        #else
+        let overflowIdentifier = "OverflowBarButtonItem"
+        app.buttons.matching(NSPredicate(format: "identifier IN %@", [identifier, overflowIdentifier])).firstMatch
+            .waitOrFail("toolbar button \(label), directly or in overflow", file: file, line: line)
+        if button.exists {
+            if let destination {
+                button.tap("toolbar button \(label)", until: destination, file: file, line: line)
+            } else {
+                button.tapWhenReady("toolbar button \(label)", file: file, line: line)
+            }
+            return
+        }
+        app.buttons[overflowIdentifier].tapWhenReady("the toolbar's overflow menu", file: file, line: line)
+        if let destination {
+            app.buttons[label].tap("overflow item \(label)", until: destination, file: file, line: line)
+        } else {
+            app.buttons[label].tapWhenReady("overflow item \(label)", file: file, line: line)
+        }
+        #endif
+    }
+
+    func tapFitToView(file: StaticString = #filePath, line: UInt = #line) {
+        tapToolbarButton(identifier: "diagram.fitToViewButton", label: "Fit to View", file: file, line: line)
+    }
+
+    /// The sidebar is open once either tab's content is in the tree, whichever it was last on. Only
+    /// the generated diagrams have these — a freeform diagram's sidebar is the node catalog.
+    var anySidebarContent: XCUIElement {
+        app.descendants(matching: .any).matching(NSPredicate(
+            format: "identifier IN %@", ["diagram.sidebarContent.settings", "diagram.sidebarContent.inspector"]
+        )).firstMatch
+    }
+
+    /// `destination` is what the caller expects the toggle to bring on screen: without it a tap that
+    /// lands while the overflow menu is still presenting does nothing and is never retried. Closing
+    /// the sidebar has no destination to name, so it passes none.
+    func tapSidebarToggle(
+        until destination: XCUIElement? = nil, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        tapToolbarButton(
+            identifier: "diagram.sidebarToggleButton", label: "Sidebar", until: destination,
+            file: file, line: line
+        )
+    }
+
+    func closeSidebar(file: StaticString = #filePath, line: UInt = #line) {
+        if SnapshotPlatform().usesCompactLayout {
+            sidebarDoneButton.tapWhenReady("the sidebar's Done button", file: file, line: line)
+        } else {
+            tapSidebarToggle(file: file, line: line)
+        }
+        anySidebarContent.waitForDisappearanceOrFail(
+            "the diagram's sidebar after closing it", file: file, line: line
+        )
+    }
+
+    // MARK: - Empty scope (`DiagramEmptyScopeOverlay`, shared by every generated diagram type)
+
+    func emptyScopeOverlay(_ reason: String) -> XCUIElement {
+        app.descendants(matching: .any)["diagram.emptyScope.\(reason)"]
+    }
+
+    var emptyScopeActionButton: XCUIElement { app.buttons["diagram.emptyScope.actionButton"] }
+
+    // MARK: - Filter (`DiagramFilterSection`, shared by every generated diagram type)
+
+    var filterTypeGlobField: XCUIElement { app.textFields["diagram.filter.selector.typeGlob"] }
+    var filterModuleGlobField: XCUIElement { app.textFields["diagram.filter.selector.module"] }
+
+    /// Closes the sidebar afterwards: on compact width it's a sheet over the overlay's button.
+    func filterEverythingAway(
+        using field: XCUIElement? = nil, hiding node: XCUIElement, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let field = field ?? filterTypeGlobField
+        let overlay = emptyScopeOverlay("filter")
+        revealInSettings(field, "the filter's glob field", file: file, line: line)
+        field.clearAndTypeText("ZzNoSuchMatch*", file: file, line: line)
+        overlay.waitOrFail("the empty-scope overlay after filtering everything away", file: file, line: line)
+        XCTAssertFalse(node.exists, "the filter should have hidden every node", file: file, line: line)
+        closeSidebar(file: file, line: line)
+        overlay.waitOrFail("the empty-scope overlay on the uncovered canvas", file: file, line: line)
+    }
+
+    func clearEmptyFilter(restoring node: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        // Clearing an already-cleared filter changes nothing, so a dropped tap is safe to repeat.
+        emptyScopeActionButton.tap("the empty canvas's Clear Filter button", until: node, file: file, line: line)
+        emptyScopeOverlay("filter")
+            .waitForDisappearanceOrFail("the empty-scope overlay after clearing the filter", file: file, line: line)
+    }
+
+    // MARK: - Compare vs git (`CompareOverlayButton`/`CompareGitPanel`, shared by every diagram type)
+
+    var compareButton: XCUIElement { app.descendants(matching: .any)["delta.openButton"] }
+    /// No "None" row and no separate on/off toggle: tapping a row enables the diff against that ref
+    /// directly; `compareClearButton` turns it back off. `name` matches `CompareGitPanel.RefRow.id`.
+    func compareRefRow(_ name: String) -> XCUIElement { app.buttons["delta.ref.\(name)"] }
+    var compareClearButton: XCUIElement { app.buttons["delta.clearButton"] }
+    var compareCustomRefField: XCUIElement { app.descendants(matching: .any)["delta.customRefField"] }
+    var compareOperation: AsyncOperation { AsyncOperation(app: app, identifierPrefix: "delta") }
+    var compareFindingsSummary: XCUIElement { app.descendants(matching: .any)["delta.findingsSummary"] }
+    var comparePickerOperation: AsyncOperation { AsyncOperation(app: app, identifierPrefix: "delta.picker") }
+
+    /// Opens the panel and waits for its branches and change requests to finish loading.
+    func openCompare(file: StaticString = #filePath, line: UInt = #line) {
+        compareButton.tap("the Compare button", until: compareRefRow("HEAD"), file: file, line: line)
+        comparePickerOperation.waitUntilLoaded("Loading the compare panel's revisions", file: file, line: line)
+    }
+
+    /// Chooses `name` in the already-open compare panel and waits for the comparison to load.
+    func compare(against name: String, timeout: TimeInterval = .uiWork, file: StaticString = #filePath, line: UInt = #line) {
+        compareRefRow(name).tapWhenReady("compare ref row \(name)", file: file, line: line)
+        compareOperation.waitUntilLoaded(
+            "Comparing against \(name)", timeout: timeout,
+            detail: {
+                " — panel in accessibility tree: \(self.compareRefRow(name).exists)"
+                    + ", compare button: \(self.compareButton.label)"
+            },
+            file: file, line: line)
+    }
+
+    /// Closes the compare panel, which otherwise covers the canvas it was opened over: the sheet's
+    /// Done button on iOS, Escape for the macOS popover.
+    func dismissCompare(file: StaticString = #filePath, line: UInt = #line) {
+        #if os(macOS)
+        app.typeKey(.escape, modifierFlags: [])
+        #else
+        app.buttons["delta.doneButton"].tapWhenReady("the compare panel's Done button", file: file, line: line)
+        #endif
+        compareRefRow("HEAD").waitForDisappearanceOrFail("the compare panel", file: file, line: line)
+    }
+}

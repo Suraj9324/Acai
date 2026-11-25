@@ -1,0 +1,104 @@
+import AcaiCore
+
+/// Chart-ready view over `CodeMetrics.ModuleCoupling`: one point per module on Robert
+/// Martin's Abstractness-vs-Instability "main sequence" chart, plus which zone it falls in relative
+/// to the main sequence line (`A + I = 1`) — the modules farthest from the line, in either
+/// direction, are the ones worth a second look.
+///
+/// Built from metrics `ModuleCouplingChartLoader` computes off the main actor.
+struct ModuleCouplingChartData {
+    /// One module's plotted point. `Zone` is the required non-color signal (alongside
+    /// `Charts`' categorical `.symbol(by:)` shape and the ranked legend list): every point's zone is
+    /// also stated in text, never conveyed by color alone.
+    struct Point: Identifiable, Equatable {
+        let id: String
+        let name: String
+        let instability: Double
+        let abstractness: Double
+        let distance: Double
+        let publicMemberCount: Int
+        let zone: Zone
+    }
+
+    /// The two "worth a second look" corners Martin names, plus the (deliberately wide) balanced
+    /// band around the line itself. A closed, real-vocabulary enum — not a namespace — consumed
+    /// exhaustively by the chart's shape/color scale and the legend list.
+    enum Zone: String, CaseIterable, Identifiable {
+        /// Stable and concrete (low instability, low abstractness): hard to extend without
+        /// breaking dependents.
+        case painful = "Zone of Pain"
+        /// Unstable and abstract (high instability, high abstractness): abstraction whose cost
+        /// isn't earning its keep, since barely anything depends on it.
+        case useless = "Zone of Uselessness"
+        case balanced = "Balanced"
+
+        var id: String { rawValue }
+
+        var symbolName: String {
+            switch self {
+            case .painful:
+                "triangle.fill"
+            case .useless:
+                "square.fill"
+            case .balanced:
+                "circle.fill"
+            }
+        }
+    }
+
+    let points: [Point]
+    private let fallbackGroup: String
+
+    /// The line itself is fixed geometry (`A + I = 1`, from `(0, 1)` to `(1, 0)`) rather than data —
+    /// callers draw it directly rather than reading it off this type.
+    ///
+    /// - Parameter fallbackGroup: the module every file with no recognisable module layout falls into.
+    init(modules: [CodeMetrics.ModuleCoupling], fallbackGroup: String) {
+        self.fallbackGroup = fallbackGroup
+        points = modules.map { module in
+            Point(
+                id: module.name,
+                name: module.name,
+                instability: module.instability,
+                abstractness: module.abstractness,
+                distance: module.distanceFromMainSequence,
+                publicMemberCount: module.publicMemberCount,
+                zone: Zone(module.mainSequenceZone)
+            )
+        }
+    }
+
+    var rankedByDistance: [Point] {
+        points.sorted { $0.distance > $1.distance }
+    }
+
+    /// `nil` once there are at least two modules to compare.
+    var emptyReason: EmptyReason? {
+        guard let only = points.first else { return .noTypes }
+        guard points.count == 1 else { return nil }
+        return only.name == fallbackGroup ? .noModuleLayout : .singleModule(name: only.name)
+    }
+
+    /// A lone module's instability is 0 by construction, so plotting it would read as a finding.
+    enum EmptyReason: Equatable {
+        case noTypes
+        case noModuleLayout
+        case singleModule(name: String)
+    }
+}
+
+extension ModuleCouplingChartData.Zone {
+    /// The chart's presentation of `AcaiCore`'s shared classification: the thresholds live once, on
+    /// `MainSequenceZone`, so a module falls in the same zone here as in `acai diagram
+    /// --module-coupling`. This adds only the chart's shape/colour vocabulary on top.
+    fileprivate init(_ zone: MainSequenceZone) {
+        switch zone {
+        case .painful:
+            self = .painful
+        case .useless:
+            self = .useless
+        case .balanced:
+            self = .balanced
+        }
+    }
+}

@@ -1,0 +1,92 @@
+import Testing
+import Foundation
+import AcaiCore
+@testable import AcaiQuality
+
+@Suite("Quality: TypeQuery")
+struct TypeQueryTests {
+
+    private func type(
+        _ name: String,
+        kind: TypeKind = .class,
+        access: AccessLevel = .public,
+        members: [Member] = []
+    ) -> TypeDeclaration {
+        TypeDeclaration(
+            id: name, name: name, qualifiedName: name, kind: kind, accessLevel: access,
+            members: members,
+            location: SourceLocation(filePath: "\(name).swift", line: 1, column: 1))
+    }
+
+    private func method(_ name: String, params: Int, access: AccessLevel = .public) -> Member {
+        Member(
+            name: name, kind: .method, accessLevel: access,
+            parameters: (0..<params).map { Parameter(internalName: "p\($0)") },
+            location: SourceLocation(filePath: "M.swift", line: 5, column: 1))
+    }
+
+    private func artifact(_ types: [TypeDeclaration]) -> CodeArtifact {
+        CodeArtifact(metadata: .init(sourceLanguage: .swift), types: types)
+    }
+
+    @Test func rowsCarryTheDocumentationTheParserCapturedAndNothingWhereThereIsNone() throws {
+        let documented = TypeDeclaration(
+            id: "Repository", name: "Repository", qualifiedName: "Repository",
+            kind: .class, accessLevel: .public,
+            members: [
+                Member(name: "save", kind: .method, accessLevel: .public, documentation: "Writes the order."),
+                Member(name: "load", kind: .method, accessLevel: .public)
+            ],
+            documentation: "Stores and retrieves orders.")
+        let rows = TypeQuery(artifact: artifact([documented, type("Bare")])).rows
+
+        let repository = try #require(rows.first { $0.qualifiedName == "Repository" })
+        #expect(repository.documentation == "Stores and retrieves orders.")
+        #expect(repository.members.first { $0.name == "save" }?.documentation == "Writes the order.")
+        #expect(repository.members.first { $0.name == "load" }?.documentation == nil)
+        #expect(rows.first { $0.qualifiedName == "Bare" }?.documentation == nil)
+    }
+
+    @Test func selectorNarrowsTypesAndRowsCarryLocations() {
+        let service = type("Service", kind: .class, members: [method("run", params: 1)])
+        let proto = type("Runnable", kind: .protocol)
+        let rows = TypeQuery(
+            artifact: artifact([service, proto]),
+            selector: Selector(kind: .class)).rows
+
+        #expect(rows.map(\.qualifiedName) == ["Service"])
+        #expect(rows[0].location?.filePath == "Service.swift")
+        #expect(rows[0].members.first?.location?.filePath == "M.swift")
+    }
+
+    @Test func explicitIDsSelectorKeepsOnlyThosePinnedTypesRegardlessOfOtherFacets() {
+        let service = type("Service", kind: .class)
+        let helper = type("Helper", kind: .class)
+        let proto = type("Runnable", kind: .protocol)
+        let rows = TypeQuery(
+            artifact: artifact([service, helper, proto]),
+            selector: Selector(kind: .class, explicitIDs: ["Service", "Runnable"])).rows
+
+        // "Runnable" passes explicitIDs but fails the `kind: .class` facet — every facet stays
+        // AND-combined, explicitIDs doesn't bypass the others.
+        #expect(rows.map(\.qualifiedName) == ["Service"])
+    }
+
+    @Test func activeMemberFilterDropsTypesWithNoMatch() {
+        let wide = type("Wide", members: [method("f", params: 4)])
+        let narrow = type("Narrow", members: [method("g", params: 1)])
+        let rows = TypeQuery(
+            artifact: artifact([wide, narrow]),
+            members: MemberFilter(kind: .method, minParameters: 3)).rows
+
+        #expect(rows.map(\.qualifiedName) == ["Wide"])
+        #expect(rows[0].members.map(\.name) == ["f"])
+    }
+
+    @Test func emptyFilterKeepsEveryTypeAndMember() {
+        let service = type("Service", members: [method("a", params: 0), method("b", params: 2)])
+        let rows = TypeQuery(artifact: artifact([service])).rows
+        #expect(rows.count == 1)
+        #expect(rows[0].members.count == 2)
+    }
+}

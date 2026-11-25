@@ -1,0 +1,417 @@
+import Foundation
+import SwiftUI
+import AcaiCore
+import AcaiDiagram
+import AcaiDiff
+import AcaiRender
+
+@MainActor
+final class ClassDiagramViewModel: ObservableObject, DiagramHistoryHosting, CanvasInteraction {
+    let codebase: Codebase
+    private(set) var artifact: CodeArtifact
+    private(set) var typeDisplayNames: TypeDisplayNames
+    private var comparisonArtifact: CodeArtifact?
+    private var diff: ArtifactDiff?
+    /// O(1) status lookups derived from `diff` once per build, so per-element tinting stays cheap on
+    /// every SwiftUI render pass (vs. `ArtifactDiff.status(of:)`'s per-call linear scan).
+    private var edgeStatus: (@Sendable (Relationship) -> DeltaStatus)?
+    private var typeStatus: (@Sendable (String) -> DeltaStatus)?
+
+    @Published var nodes: [GeneratedDiagramNode] = [] { didSet { rotorPlanCache.invalidate() } }
+    @Published var edges: [GeneratedDiagramEdge] = [] { didSet { rotorPlanCache.invalidate() } }
+    @Published var nodePositions: [String: CGPoint] = [:] { didSet { rotorPlanCache.invalidate() } }
+    @Published var nodeSizes: [String: CGSize] = [:] { didSet { rotorPlanCache.invalidate() } }
+    @Published var userNodeSizes: [String: CGSize] = [:] { didSet { rotorPlanCache.invalidate() } }
+    let rotorPlanCache = DiagramRotorPlanCache()
+    @Published var selectedNodeIDs: Set<String> = []
+    @Published var isMultiSelectActive = false
+    @Published private(set) var hasPerformedMeasuredLayout = false
+    @Published var selectionRect: CGRect?
+    /// Set instead of building the diagram when `configuration.maxNodes` would be exceeded — laying
+    /// out and measuring that many nodes is the hang the ceiling exists to prevent, so this stops
+    /// short of it rather than attempting it behind the progress indicator.
+    @Published private(set) var nodeLimitError: DiagramRequestError?
+    @Published private(set) var emptyReason: DiagramEmptyReason = .codebase
+
+    private(set) var configuration: ClassDiagramConfiguration
+    private var restoredPositions: [String: CGPoint]?
+    /// Shared, view-independent build + layout core (also used by the CLI image renderer).
+    private var model: DiagramLayoutModel
+
+    // MARK: - Undo / Redo
+
+    struct LayoutSnapshot: Equatable, Sendable {
+        var nodePositions: [String: CGPoint]
+        var userNodeSizes: [String: CGSize]
+    }
+
+    /// History manager backing Cmd+Z / Shift+Cmd+Z.
+    let history = DiagramHistoryManager<LayoutSnapshot>()
+
+    /// Undoable state: node positions and user-overridden sizes. (See `DiagramHistoryHosting`.)
+    /// Persistence is the view's responsibility (it owns the canvas scale/offset), so there is
+    /// no `persistAfterHistoryChange` override — the view pairs `undo()`/`redo()` with
+    /// `savePositions()`.
+    var historySnapshot: LayoutSnapshot {
+        get { LayoutSnapshot(nodePositions: nodePositions, userNodeSizes: userNodeSizes) }
+        set {
+            nodePositions = newValue.nodePositions
+            userNodeSizes = newValue.userNodeSizes
+        }
+    }
+
+    init(
+        codebase: Codebase,
+        artifact: CodeArtifact,
+        configuration: ClassDiagramConfiguration = .init(),
+        restoredPositions: [String: CGPoint]? = nil,
+        restoredSizes: [String: CGSize]? = nil,
+        comparisonArtifact: CodeArtifact? = nil
+    ) {
+        self.codebase = codebase
+        self.artifact = artifact
+        self.typeDisplayNames = artifact.typeDisplayNames
+        self.comparisonArtifact = comparisonArtifact
+        self.configuration = configuration
+        self.restoredPositions = restoredPositions
+        self.model = DiagramLayoutModel(
+            artifact: artifact, configuration: configuration,
+            languages: artifact.standardLanguageResolver
+        )
+        if let restoredSizes {
+            self.userNodeSizes = restoredSizes
+        }
+        buildDiagram()
+    }
+
+    // MARK: - Build Diagram
+
+    private func buildDiagram() {
+        // In delta mode, render the union of both revisions so removed types/edges still appear and
+        // can be tinted; otherwise render the working-tree artifact directly.
+        let renderArtifact: CodeArtifact
+        if let comparisonArtifact {
+            let differ = ArtifactDiffer()
+            let computed = differ.diff(old: comparisonArtifact, new: artifact)
+            diff = computed
+            edgeStatus = computed.relationshipStatusLookup()
+            typeStatus = computed.typeStatusLookup()
+            renderArtifact = differ.unionArtifact(old: comparisonArtifact, new: artifact)
+        } else {
+            diff = nil
+            edgeStatus = nil
+            typeStatus = nil
+            renderArtifact = artifact
+        }
+        model = DiagramLayoutModel(
+            artifact: renderArtifact, configuration: configuration,
+            languages: renderArtifact.standardLanguageResolver
+        )
+        do {
+            try DiagramNodeLimit(maximum: configuration.maxNodes).validate(nodeCount: model.nodes.count)
+            nodeLimitError = nil
+        } catch {
+            nodeLimitError = DiagramRequestError(error.localizedDescription)
+            nodes = []
+            edges = []
+            nodePositions = [:]
+            return
+        }
+        nodes = model.nodes
+        edges = model.edges
+        emptyReason = resolvedEmptyReason(in: renderArtifact)
+
+        for node in nodes {
+            nodeSizes[node.id] = DiagramLayoutModel.estimateSize(for: node)
+        }
+
+        applyOrPerformLayout()
+    }
+
+    private func applyOrPerformLayout() {
+        if let restored = restoredPositions, !restored.isEmpty {
+            nodePositions = restored
+            let missing = nodes.filter { restored[$0.id] == nil }
+            if !missing.isEmpty {
+                performLayout()
+                for (id, pos) in restored {
+                    nodePositions[id] = pos
+                }
+            }
+        } else {
+            performLayout()
+        }
+    }
+
+    // MARK: - Empty Scope
+
+    private func resolvedEmptyReason(in renderArtifact: CodeArtifact) -> DiagramEmptyReason {
+        guard model.nodes.isEmpty else { return .codebase }
+        let undos: [DiagramEmptyReason] = configuration.isFocused ? [.scope, .filter, .scopeAndFilter] : [.filter]
+        return undos.first { undo in
+            !DiagramLayoutModel(
+                artifact: renderArtifact, configuration: configuration.widened(undoing: undo),
+                languages: renderArtifact.standardLanguageResolver
+            ).nodes.isEmpty
+        } ?? .codebase
+    }
+
+    // MARK: - Apply Configuration
+
+    func applyConfiguration(_ newConfig: ClassDiagramConfiguration, artifact: CodeArtifact) {
+        let groupingChanged = newConfig.grouping != configuration.grouping
+        self.configuration = newConfig
+        // Drop saved positions when the grouping changes so the layout actually reflows;
+        // otherwise keep current positions so unrelated tweaks don't disturb them.
+        self.restoredPositions = groupingChanged ? nil : nodePositions
+        hasPerformedMeasuredLayout = false
+        // The rebuilt node set differs, so a stale snapshot must not be restorable.
+        history.clear()
+        buildDiagram()
+    }
+
+    // MARK: - Apply Comparison
+
+    /// Re-derives in place for a new comparison; saved positions and undo history no longer apply.
+    func updateComparison(artifact: CodeArtifact, comparison: CodeArtifact?) {
+        self.artifact = artifact
+        self.typeDisplayNames = artifact.typeDisplayNames
+        self.comparisonArtifact = comparison
+        restoredPositions = nil
+        hasPerformedMeasuredLayout = false
+        selectedNodeIDs = []
+        history.clear()
+        let measured = nodeSizes
+        buildDiagram()
+        // Keep measured sizes: buildDiagram's estimates are wider and would spread the layout.
+        for node in nodes {
+            if let size = measured[node.id] { nodeSizes[node.id] = size }
+        }
+        performLayout()
+    }
+
+    // MARK: - Layout
+
+    func performLayout() {
+        let sizes = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, effectiveSize(for: $0.id)) })
+        nodePositions = model.performLayout(sizes: sizes)
+    }
+
+    // MARK: - Grouping Boxes
+
+    /// Nested bounding boxes for the active grouping mode, computed from the *current* node
+    /// rects so they always wrap their nodes after drags, resizes and measured-size updates.
+    var groupingBoxes: [DiagramLayoutModel.GroupingBox] {
+        let sizes = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, effectiveSize(for: $0.id)) })
+        return model.groupingBoxes(
+            positions: nodePositions, sizes: sizes, titleScale: currentDynamicTypeSize.scaleFactor)
+    }
+
+    // MARK: - Selection
+
+    /// Drives the shared `selectAll` / marquee defaults on `CanvasInteraction`.
+    var allNodeIDs: [String] { nodes.map(\.id) }
+
+    // MARK: - Movement & Resize
+
+    func moveNode(_ id: String, to position: CGPoint) {
+        nodePositions[id] = position
+    }
+
+    /// Current center of a node (`CanvasInteraction`).
+    func nodePosition(_ id: String) -> CGPoint? {
+        nodePositions[id]
+    }
+
+    func resizeNode(_ id: String, width: CGFloat, height: CGFloat) {
+        userNodeSizes[id] = CGSize(width: max(80, width), height: max(50, height))
+    }
+
+    /// The effective size for a node: user-overridden > measured > estimated.
+    func effectiveSize(for id: String) -> CGSize {
+        userNodeSizes[id] ?? nodeSizes[id] ?? CGSize(width: 200, height: 100)
+    }
+
+    /// Called when actual rendered sizes are reported via preference keys.
+    func updateMeasuredSizes(_ measured: [String: CGSize]) {
+        var changed = false
+        for (id, size) in measured {
+            if let existing = nodeSizes[id] {
+                let dx = abs(existing.width - size.width)
+                let dy = abs(existing.height - size.height)
+                if dx > 2 || dy > 2 {
+                    nodeSizes[id] = size
+                    changed = true
+                }
+            } else {
+                nodeSizes[id] = size
+                changed = true
+            }
+        }
+        if changed && !hasPerformedMeasuredLayout {
+            hasPerformedMeasuredLayout = true
+            if restoredPositions == nil || restoredPositions!.isEmpty {
+                performLayout()
+            }
+        }
+    }
+
+    /// The environment's current Dynamic Type size, so `groupingBoxes` can reserve the same amount of
+    /// space `GroupingBoxView`'s tab actually needs at this size — defaults to `.large` (no scaling)
+    /// until the view reports the real value on appear.
+    private(set) var currentDynamicTypeSize: DynamicTypeSize = .large {
+        didSet { rotorPlanCache.invalidate() }
+    }
+
+    /// The system text size changed while this diagram was open (or the view is reporting it for the
+    /// first time). Node boxes will re-measure at their new (larger or smaller) rendered size, but
+    /// `updateMeasuredSizes` only re-runs layout once per invalidation — without resetting that latch,
+    /// positions computed for the old size category would be left in place under boxes that no longer
+    /// fit them, overlapping their neighbours.
+    func updateDynamicTypeSize(_ size: DynamicTypeSize) {
+        guard size != currentDynamicTypeSize else { return }
+        currentDynamicTypeSize = size
+        hasPerformedMeasuredLayout = false
+    }
+
+    var isDeltaMode: Bool { diff != nil }
+
+    /// The delta tint for an edge (added green / removed red / changed amber), or `nil` when the
+    /// edge is unchanged or the diagram isn't in delta mode.
+    func deltaColor(for edge: GeneratedDiagramEdge) -> Color? {
+        guard let hex = deltaStatus(for: edge)?.deltaHex else { return nil }
+        return Color(hex: hex)
+    }
+
+    /// Non-color complement to `deltaColor(for:)`, for VoiceOver.
+    func deltaStatus(for edge: GeneratedDiagramEdge) -> DeltaStatus? {
+        guard let edgeStatus else { return nil }
+        return edgeStatus(Relationship(kind: edge.kind, source: edge.sourceID, target: edge.targetID))
+    }
+
+    var nodeNamesByID: [String: String] {
+        Dictionary(nodes.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
+    }
+
+    func edgeAccessibility(for edge: GeneratedDiagramEdge, nodeNames: [String: String]) -> EdgeAccessibility {
+        DiagramElementDescription(
+            classEdge: edge,
+            sourceName: nodeNames[edge.sourceID] ?? edge.sourceID,
+            targetName: nodeNames[edge.targetID] ?? edge.targetID,
+            delta: deltaStatus(for: edge)
+        ).edgeAccessibility(identifier: edge.accessibilityIdentifier)
+    }
+
+    /// The delta fill for a type node (added green / removed red / changed amber), or `nil` when
+    /// the type is unchanged or the diagram isn't in delta mode.
+    func deltaColor(for node: GeneratedDiagramNode) -> Color? {
+        guard let typeStatus, let hex = typeStatus(node.id).deltaHex else { return nil }
+        return Color(hex: hex)
+    }
+
+    /// Non-color complement to `deltaColor(for:)` — feeds `TypeNodeView`'s `+`/`−`/`~` badge.
+    func deltaBadge(for node: GeneratedDiagramNode) -> DeltaStatus? {
+        guard let typeStatus else { return nil }
+        let status = typeStatus(node.id)
+        return status == .unchanged ? nil : status
+    }
+
+    func typeChange(for node: GeneratedDiagramNode) -> TypeChange? {
+        diff?.typeChange(ofType: node.id)
+    }
+
+    // MARK: - Dependents
+
+    /// Every type that (transitively) depends on `nodeID` — the same analysis backing `acai dependents`
+    /// and the `acai_dependents` MCP tool, reused rather than reimplemented.
+    func dependents(for nodeID: String) -> [ImpactAnalysis.Dependent] {
+        ImpactAnalysis(artifact: artifact, rootType: nodeID).report.dependents
+    }
+
+    func nodeRect(for id: String) -> CGRect? {
+        guard let pos = nodePositions[id] else { return nil }
+        let size = effectiveSize(for: id)
+        return CGRect(
+            x: pos.x - size.width / 2,
+            y: pos.y - size.height / 2,
+            width: size.width,
+            height: size.height
+        )
+    }
+
+    // MARK: - Search
+
+    /// Live "find in diagram" query, matched against each node's display name. Search is
+    /// intentionally excluded from `LayoutSnapshot`/undo — it's transient view state, not data.
+    @Published var searchQuery: String = "" {
+        didSet {
+            guard searchQuery != oldValue else { return }
+            searchStepIndex = 0
+        }
+    }
+    @Published private var searchStepIndex = 0
+
+    /// Node ids matching `searchQuery`, in canvas node order. Empty whenever the query is empty,
+    /// so callers can use `isEmpty` as "search inactive" without checking `searchQuery` too.
+    var searchMatchIDs: [String] {
+        guard !searchQuery.isEmpty else { return [] }
+        return nodes.filter { $0.name.localizedCaseInsensitiveContains(searchQuery) }.map(\.id)
+    }
+
+    /// The node the view should be centered on: the first match as soon as a query starts
+    /// matching, then whichever match `stepSearchForward`/`stepSearchBackward` last selected.
+    var currentSearchNodeID: String? {
+        let matches = searchMatchIDs
+        guard !matches.isEmpty else { return nil }
+        return matches[normalizedSearchIndex(in: matches)]
+    }
+
+    private func normalizedSearchIndex(in matches: [String]) -> Int {
+        ((searchStepIndex % matches.count) + matches.count) % matches.count
+    }
+
+    func stepSearchForward() {
+        guard !searchMatchIDs.isEmpty else { return }
+        searchStepIndex += 1
+    }
+
+    func stepSearchBackward() {
+        guard !searchMatchIDs.isEmpty else { return }
+        searchStepIndex -= 1
+    }
+
+    /// Clears the query (and with it, every match/dimming state) without touching selection,
+    /// layout or the canvas's current pan/zoom — the diagram's data is exactly as it was.
+    func dismissSearch() {
+        searchQuery = ""
+    }
+
+    // MARK: - Image Export
+
+    func exportPNGData(scale: CGFloat = 2) throws -> Data {
+        let sizes = Dictionary(uniqueKeysWithValues: nodes.map { ($0.id, effectiveSize(for: $0.id)) })
+        // In delta mode the exported PNG carries the same tints as the on-screen canvas. Precompute
+        // the colours into Sendable maps so the render closures don't capture the main-actor model.
+        var edgeColor: (@Sendable (GeneratedDiagramEdge) -> Color?)?
+        var nodeColor: (@Sendable (GeneratedDiagramNode) -> Color?)?
+        var nodeBadge: (@Sendable (GeneratedDiagramNode) -> DeltaStatus?)?
+        if isDeltaMode {
+            let edgeColors = Dictionary(edges.compactMap { e in deltaColor(for: e).map { (e.id, $0) } },
+                                        uniquingKeysWith: { first, _ in first })
+            let nodeColors = Dictionary(nodes.compactMap { n in deltaColor(for: n).map { (n.id, $0) } },
+                                        uniquingKeysWith: { first, _ in first })
+            let nodeBadges = Dictionary(nodes.compactMap { n in deltaBadge(for: n).map { (n.id, $0) } },
+                                        uniquingKeysWith: { first, _ in first })
+            edgeColor = { edgeColors[$0.id] }
+            nodeColor = { nodeColors[$0.id] }
+            nodeBadge = { nodeBadges[$0.id] }
+        }
+        let laidOut = LaidOutDiagram(
+            nodes: nodes, edges: edges, positions: nodePositions, sizes: sizes, groupingBoxes: groupingBoxes)
+        return try ClassImageRenderer().renderPNG(
+            laidOut: laidOut,
+            context: RenderingContext(scale: scale),
+            colors: ClassColorOverrides(edge: edgeColor, node: nodeColor, badge: nodeBadge)
+        )
+    }
+}

@@ -1,0 +1,68 @@
+#!/bin/bash
+# Refreshes the committed XCUITest screenshot and widget render goldens from a CI run's uploaded captures.
+#
+# CI's renderer is the only one whose output the goldens are compared against, so a local recording
+# run wouldn't produce trustworthy bytes — the artifacts are the source of truth. Every run uploads
+# them (pass or fail), because ScreenshotComparator writes each capture unconditionally.
+#
+#   Scripts/snapshots_accept.sh            # newest Build & Test run for the current branch
+#   Scripts/snapshots_accept.sh 32201788340
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+GOLDENS="App/AcaiUITests/__Snapshots__"
+
+RUN_ID="${1:-}"
+if [ -z "$RUN_ID" ]; then
+    BRANCH=$(git rev-parse --abbrev-ref HEAD)
+    RUN_ID=$(gh run list --workflow build-test.yml --branch "$BRANCH" --limit 1 --json databaseId --jq '.[0].databaseId')
+    [ -n "$RUN_ID" ] || { echo "No Build & Test run found for branch $BRANCH." >&2; exit 1; }
+    echo "▸ Using newest Build & Test run for $BRANCH: $RUN_ID"
+fi
+
+STAGING=$(mktemp -d)
+trap 'rm -rf "$STAGING"' EXIT
+
+# macOS uploads one artifact; each iOS journey shard uploads its own, e.g. `iPhone-shard-2`.
+ARTIFACTS=$(gh api "repos/{owner}/{repo}/actions/runs/$RUN_ID/artifacts?per_page=100" \
+    --jq '.artifacts[].name | select(test("^(macOS|iPhone|iPad)(-shard-[0-9]+)?$"))')
+
+FOUND=0
+for ARTIFACT in $ARTIFACTS; do
+    PLATFORM="${ARTIFACT%%-shard-*}"
+    if ! gh run download "$RUN_ID" -n "$ARTIFACT" -D "$STAGING/$ARTIFACT"; then
+        echo "  ⚠️  couldn't download '$ARTIFACT' from run $RUN_ID — skipping"
+        continue
+    fi
+    FOUND=1
+    # `*.captured.png` is a below-threshold state's real capture, kept for inspection only.
+    while IFS= read -r CAPTURE; do
+        RELATIVE="${CAPTURE#"$STAGING/$ARTIFACT/"}"
+        TARGET="$GOLDENS/$PLATFORM/$RELATIVE"
+        if cmp -s "$CAPTURE" "$TARGET"; then
+            echo "  unchanged  $PLATFORM/$RELATIVE"
+        else
+            mkdir -p "$(dirname "$TARGET")"
+            cp "$CAPTURE" "$TARGET"
+            echo "  updated    $PLATFORM/$RELATIVE"
+        fi
+    done < <(find "$STAGING/$ARTIFACT" -name '*.png' ! -name '*.captured.png')
+done
+
+# The widget's render snapshots, from the Unit Test iOS job.
+WIDGET_GOLDENS="Tests/AcaiWidgetTests/__Snapshots__"
+if gh run download "$RUN_ID" -n widget-render-snapshots -D "$STAGING/widget" 2>/dev/null; then
+    FOUND=1
+    while IFS= read -r CAPTURE; do
+        TARGET="$WIDGET_GOLDENS/$(basename "$CAPTURE")"
+        if cmp -s "$CAPTURE" "$TARGET"; then
+            echo "  unchanged  widget/$(basename "$CAPTURE")"
+        else
+            cp "$CAPTURE" "$TARGET"
+            echo "  updated    widget/$(basename "$CAPTURE")"
+        fi
+    done < <(find "$STAGING/widget" -name '*.png')
+fi
+
+[ "$FOUND" -eq 1 ] || { echo "No screenshot artifacts on run $RUN_ID." >&2; exit 1; }
+echo "▸ Review with 'git diff -- $GOLDENS $WIDGET_GOLDENS' before committing."

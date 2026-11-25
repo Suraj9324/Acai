@@ -1,0 +1,135 @@
+import ArgumentParser
+import AcaiQuality
+import AcaiCore
+import AcaiLibrary
+
+extension AcaiCommand {
+    struct Inspect: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Enumerate types and members as JSON/human, filtered by a selector"
+        )
+
+        @OptionGroup var artifactSource: ArtifactSource
+        @OptionGroup var generatedScope: GeneratedScopeOption
+        @OptionGroup var selector: SelectorOption
+
+        @Option(name: .long, help: "Only members of this kind (e.g. method, property, initializer).")
+        var memberKind: MemberKind?
+
+        @Option(name: .long, help: "Only members with at least this many parameters.")
+        var minParameters: Int?
+
+        @Flag(name: .long, help: "Only publicly-settable stored properties (mutable public state).")
+        var publicVars = false
+
+        @Flag(name: .long, help: "Only members that override an inherited member.")
+        var overrides = false
+
+        @Flag(name: .long, help: ArgumentHelp(
+            "List enum cases with their raw and associated values instead of types/members."))
+        var enums = false
+
+        @Option(name: .long, help: "Report format: json (default) or human.")
+        var format: ReportFormatOption = .json
+
+        @Option(name: .long, help: "Output file path. Prints to stdout if omitted.")
+        var output: String?
+
+        mutating func validate() throws {
+            try artifactSource.validate()
+        }
+
+        mutating func run() async throws {
+            if enums {
+                try await runEnumInventory()
+                return
+            }
+            let artifact = try await generatedScope.applied(to: artifactSource.resolve())
+            let rows = TypeQuery(
+                artifact: artifact,
+                selector: selector.selector,
+                members: MemberFilter(
+                    kind: memberKind,
+                    minParameters: minParameters,
+                    isPublicVar: publicVars ? true : nil,
+                    isOverride: overrides ? true : nil),
+                languageResolver: artifact.standardLanguageResolver
+            ).rows
+
+            let rendered: String
+            switch format {
+            case .json:
+                let payload = InspectPayload(types: rows, health: HealthCheck(artifact: artifact).summary)
+                rendered = try JSONReport(payload).text
+            case .human:
+                rendered = humanReport(rows)
+            }
+            try rendered.writeOutput(to: output, label: "inspection")
+        }
+
+        private func runEnumInventory() async throws {
+            let artifact = try await generatedScope.applied(to: artifactSource.resolve())
+            let entries = EnumInventory(artifact: artifact).entries
+            let rendered: String
+            if format == .json {
+                let payload = EnumInventoryPayload(enums: entries, health: HealthCheck(artifact: artifact).summary)
+                rendered = try JSONReport(payload).text
+            } else {
+                rendered = enumHuman(entries)
+            }
+            try rendered.writeOutput(to: output, label: "enum inventory")
+        }
+
+        private func enumHuman(_ entries: [EnumInventory.Entry]) -> String {
+            guard !entries.isEmpty else { return "No enums found.\n" }
+            var lines: [String] = []
+            for entry in entries {
+                lines.append("\(entry.type)\(entry.location.suffix)")
+                lines.append(contentsOf: entry.documentation.documentationLines(indent: "  "))
+                for enumCase in entry.cases {
+                    var text = "  - \(enumCase.name)"
+                    if !enumCase.associatedValues.isEmpty {
+                        text += "(\(enumCase.associatedValues.joined(separator: ", ")))"
+                    }
+                    if let rawValue = enumCase.rawValue {
+                        text += " = \(rawValue)"
+                    }
+                    lines.append(text)
+                    lines.append(contentsOf: enumCase.documentation.documentationLines(indent: "    "))
+                }
+            }
+            return lines.joined(separator: "\n") + "\n"
+        }
+
+        private func humanReport(_ rows: [TypeQuery.TypeRow]) -> String {
+            guard !rows.isEmpty else { return "No types matched.\n" }
+            var lines: [String] = []
+            for row in rows {
+                lines.append("\(row.qualifiedName) [\(row.kind.rawValue), \(row.module)]\(row.location.suffix)")
+                lines.append(contentsOf: row.documentation.documentationLines(indent: "  "))
+                for member in row.members {
+                    let params = member.parameterCount > 0 ? "(\(member.parameterCount))" : ""
+                    lines.append(
+                        "  - \(member.name)\(params): \(member.kind.rawValue) "
+                        + "(\(member.access.rawValue))\(member.location.suffix)")
+                    lines.append(contentsOf: member.documentation.documentationLines(indent: "    "))
+                }
+            }
+            lines.append("")
+            lines.append("\(rows.count) type(s) matched.")
+            return lines.joined(separator: "\n") + "\n"
+        }
+    }
+}
+
+/// `health` lets a consumer of `acai inspect --format json` (either mode) tell whether the listing
+/// rests on a trustworthy parse without a separate `acai analyze --health` round trip.
+private struct InspectPayload: Encodable {
+    var types: [TypeQuery.TypeRow]
+    var health: HealthCheck.Summary
+}
+
+private struct EnumInventoryPayload: Encodable {
+    var enums: [EnumInventory.Entry]
+    var health: HealthCheck.Summary
+}

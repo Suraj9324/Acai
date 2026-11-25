@@ -1,0 +1,387 @@
+import Testing
+@testable import AcaiCore
+@testable import AcaiDiagram
+
+@Suite("Dead-code scan")
+struct DeadCodeScanTests {
+
+    private func method(
+        _ name: String,
+        access: AccessLevel = .private,
+        modifiers: [Modifier] = [],
+        annotations: [String] = [],
+        calls: [CallSite] = []
+    ) -> Member {
+        Member(
+            name: name, kind: .method, accessLevel: access, modifiers: modifiers, annotations: annotations,
+            location: SourceLocation(filePath: "S.swift", line: 1, column: 1), callSites: calls)
+    }
+
+    private func member(
+        _ name: String,
+        kind: MemberKind,
+        access: AccessLevel = .private,
+        modifiers: [Modifier] = [],
+        annotations: [String] = [],
+        labels: [String] = []
+    ) -> Member {
+        Member(
+            name: name, kind: kind, accessLevel: access, modifiers: modifiers,
+            parameters: labels.map { Parameter(externalName: $0, internalName: $0) },
+            annotations: annotations,
+            location: SourceLocation(filePath: "S.swift", line: 1, column: 1))
+    }
+
+    /// A language that records calls to every kind, so the scan's own per-kind behaviour can be
+    /// pinned independently of what any real parser happens to record today.
+    private func scanning(_ kinds: Set<MemberKind>) -> LanguageConfigurationResolver {
+        LanguageConfigurationResolver(single: LanguageConfiguration(deadCodeMemberKinds: kinds))
+    }
+
+    private func report(
+        _ types: [TypeDeclaration], scanning kinds: Set<MemberKind> = [.method]
+    ) -> DeadCodeScan.Report {
+        DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: types),
+            languages: scanning(kinds)).report
+    }
+
+    private func widget(_ members: [Member]) -> TypeDeclaration {
+        TypeDeclaration(
+            id: "Widget", name: "Widget", qualifiedName: "Widget", kind: .class, accessLevel: .public,
+            members: members, location: SourceLocation(filePath: "Widget.swift", line: 1, column: 1))
+    }
+
+    private func artifact() -> CodeArtifact {
+        let service = TypeDeclaration(
+            id: "Service", name: "Service", qualifiedName: "Service", kind: .class, accessLevel: .public,
+            members: [
+                method("entry", access: .public, calls: [CallSite(receiver: .type("Service"), methodName: "used")]),
+                method("used"),
+                method("unused"),
+                method("publicButUncalled", access: .public),
+                method("overridden", modifiers: [.override]),
+                method("lifecycle", annotations: ["@Test"])
+            ],
+            location: SourceLocation(filePath: "Service.swift", line: 1, column: 1))
+        return CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [service])
+    }
+
+    @Test func onlyUncalledNonEntryPrivateMethodIsCandidate() {
+        let report = DeadCodeScan(
+            artifact: artifact(),
+            languages: LanguageConfigurationResolver(
+                single: LanguageConfiguration(entryPointMarkers: EntryPointMarkers(annotations: ["test"])))).report
+
+        #expect(report.candidates.map(\.id) == ["Service.unused()"])
+        // A resolved call to `used` means coverage is 100%.
+        #expect(report.coverage.fraction == 1)
+    }
+
+    @Test func markerlessScanStillExcludesUniversalEntryPoints() {
+        let report = DeadCodeScan(
+            artifact: artifact(),
+            languages: LanguageConfigurationResolver(single: LanguageConfiguration())).report
+        #expect(report.candidates.map(\.id).sorted() == ["Service.lifecycle()", "Service.unused()"])
+    }
+
+    /// A bare `foo()` reaches the scan as a `.selfDispatch` call site; the private method it targets
+    /// must be marked used, not reported dead.
+    @Test func bareSelfCallMarksPrivateMethodUsed() {
+        let service = TypeDeclaration(
+            id: "Service", name: "Service", qualifiedName: "Service", kind: .class, accessLevel: .public,
+            members: [
+                method("entry", access: .public, calls: [CallSite(receiver: .selfDispatch, methodName: "used")]),
+                method("used")
+            ],
+            location: SourceLocation(filePath: "Service.swift", line: 1, column: 1))
+        let report = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [service]),
+            languages: LanguageConfigurationResolver(single: LanguageConfiguration())).report
+        #expect(report.candidates.isEmpty)
+    }
+
+    /// An abstract method is a body-less contract implemented by subtypes and reached polymorphically,
+    /// so it is never a dead-code candidate even when non-public and uncalled.
+    @Test func abstractMethodIsNotACandidate() {
+        let base = TypeDeclaration(
+            id: "Base", name: "Base", qualifiedName: "Base", kind: .class, accessLevel: .internal,
+            members: [method("hook", modifiers: [.abstract])],
+            location: SourceLocation(filePath: "Base.swift", line: 1, column: 1))
+        let report = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [base]),
+            languages: LanguageConfigurationResolver(single: LanguageConfiguration())).report
+        #expect(report.candidates.isEmpty)
+    }
+
+    /// A non-public method that satisfies a requirement of an in-artifact protocol the type conforms to
+    /// is a witness — reached through the conformance, so never a candidate even with no call edge.
+    @Test func protocolWitnessIsNotACandidate() {
+        let proto = TypeDeclaration(
+            id: "Runnable", name: "Runnable", qualifiedName: "Runnable", kind: .protocol, accessLevel: .public,
+            members: [method("run", access: .public)],
+            location: SourceLocation(filePath: "Runnable.swift", line: 1, column: 1))
+        let tool = TypeDeclaration(
+            id: "Tool", name: "Tool", qualifiedName: "Tool", kind: .struct, accessLevel: .internal,
+            inheritedTypes: [TypeReference(name: "Runnable")],
+            members: [method("run"), method("orphan")],
+            location: SourceLocation(filePath: "Tool.swift", line: 1, column: 1))
+        let report = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [proto, tool]),
+            languages: LanguageConfigurationResolver(single: LanguageConfiguration())).report
+        #expect(report.candidates.map(\.id) == ["Tool.orphan()"])
+    }
+
+    /// Two declared types sharing a simple name each call their own method by self-dispatch; neither
+    /// call may be lost to the other's node, so neither `used` is reported dead.
+    @Test func sameSimpleNameInDifferentModulesAreScoredSeparately() {
+        let configA = TypeDeclaration(
+            id: "ModuleA.Config", name: "Config", qualifiedName: "ModuleA.Config", kind: .class,
+            accessLevel: .public,
+            members: [
+                method("run", access: .public, calls: [CallSite(receiver: .selfDispatch, methodName: "used")]),
+                method("used")
+            ],
+            location: SourceLocation(filePath: "ModuleA/Config.swift", line: 1, column: 1))
+        let configB = TypeDeclaration(
+            id: "ModuleB.Config", name: "Config", qualifiedName: "ModuleB.Config", kind: .class,
+            accessLevel: .public,
+            members: [
+                method("run", access: .public, calls: [CallSite(receiver: .selfDispatch, methodName: "used")]),
+                method("used")
+            ],
+            location: SourceLocation(filePath: "ModuleB/Config.swift", line: 1, column: 1))
+        let report = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [configA, configB]),
+            languages: LanguageConfigurationResolver(single: LanguageConfiguration())).report
+        #expect(report.candidates.isEmpty)
+    }
+
+    // MARK: - Member kinds
+
+    /// An uncalled initializer is a candidate where the language opts the kind in, and the identical
+    /// declaration is invisible where it does not — the whole point of `deadCodeMemberKinds`.
+    @Test func anUncalledInitializerIsACandidateOnlyWhereTheLanguageScansInitializers() {
+        let types = [widget([member("init", kind: .initializer)])]
+        #expect(report(types, scanning: [.method, .initializer]).candidates.map(\.id) == ["Widget.init()"])
+        #expect(report(types).candidates.isEmpty)
+    }
+
+    @Test func aCalledInitializerIsNotACandidate() {
+        let types = [widget([
+            method("make", access: .public, calls: [CallSite(receiver: .type("Widget"), methodName: "init")]),
+            member("init", kind: .initializer)
+        ])]
+        #expect(report(types, scanning: [.method, .initializer]).candidates.isEmpty)
+    }
+
+    /// A call naming one overload leaves the other reported: each overload is its own candidate, and
+    /// the call's argument list says which one it reached (issue #506).
+    @Test func aCallToOneInitializerOverloadStillReportsTheOther() {
+        let types = [widget([
+            method("make", access: .public, calls: [
+                CallSite(receiver: .type("Widget"), methodName: "init", arguments: ["name"])
+            ]),
+            member("init", kind: .initializer, labels: ["name"]),
+            member("init", kind: .initializer, labels: ["name", "size"])
+        ])]
+        #expect(
+            report(types, scanning: [.method, .initializer]).candidates.map(\.id) == ["Widget.init(name:,size:)"])
+    }
+
+    /// A call whose argument list narrows to neither overload falls back to the name, which spares
+    /// both: an uncalled overload reported dead because the graph guessed its sibling would be worse
+    /// than one it missed.
+    @Test func anUnnarrowableCallSparesEveryOverload() {
+        let types = [widget([
+            method("make", access: .public, calls: [CallSite(receiver: .type("Widget"), methodName: "init")]),
+            member("init", kind: .initializer, labels: ["name"]),
+            member("init", kind: .initializer, labels: ["size"])
+        ])]
+        #expect(report(types, scanning: [.method, .initializer]).candidates.isEmpty)
+    }
+
+    /// Uncalled overloads are separate candidates, each named by its own parameter list.
+    @Test func uncalledInitializerOverloadsAreReportedSeparately() {
+        let types = [widget([
+            member("init", kind: .initializer, labels: ["name"]),
+            member("init", kind: .initializer, labels: ["name", "size"])
+        ])]
+        #expect(
+            report(types, scanning: [.method, .initializer]).candidates.map(\.id)
+                == ["Widget.init(name:)", "Widget.init(name:,size:)"])
+    }
+
+    @Test func theReportNamesTheKindsItScannedInDeclarationOrder() {
+        let types = [widget([method("run")])]
+        #expect(report(types).scannedKinds == [.method])
+        #expect(report(types, scanning: [.subscript, .initializer, .method]).scannedKinds
+            == [.method, .initializer, .subscript])
+    }
+
+    @Test func aPolyglotReportNamesTheUnionOfItsLanguagesKinds() {
+        let tool = TypeDeclaration(
+            id: "Tool", name: "Tool", qualifiedName: "Tool", kind: .class, accessLevel: .public,
+            members: [method("run")], location: SourceLocation(filePath: "Tool.swift", line: 1, column: 1),
+            sourceLanguage: SubscriptScanningParser().language)
+        let languages = LanguageConfigurationResolver(
+            registry: LanguageRegistry(parsers: [SubscriptScanningParser()]),
+            default: LanguageConfiguration())
+        let scan = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [widget([]), tool]),
+            languages: languages)
+        #expect(scan.report.scannedKinds == [.method, .subscript])
+    }
+
+    @Test func anArtifactWithNothingToScanNamesNoKinds() {
+        #expect(report([]).scannedKinds.isEmpty)
+    }
+
+    @Test func anUncalledSubscriptIsACandidateOnlyWhereTheLanguageScansSubscripts() {
+        let types = [widget([member("subscript", kind: .subscript)])]
+        #expect(report(types, scanning: [.method, .subscript]).candidates.map(\.id) == ["Widget.subscript()"])
+        #expect(report(types).candidates.isEmpty)
+    }
+
+    @Test func aCalledSubscriptIsNotACandidate() {
+        let types = [widget([
+            method("read", access: .public, calls: [CallSite(receiver: .type("Widget"), methodName: "subscript")]),
+            member("subscript", kind: .subscript)
+        ])]
+        #expect(report(types, scanning: [.method, .subscript]).candidates.isEmpty)
+    }
+
+    /// A deinitializer is never called by name, so the question doesn't apply — and no language opts
+    /// the kind in. Scanned only if one explicitly asked, which none does.
+    @Test func aDeinitializerIsNotACandidate() {
+        let types = [widget([member("deinit", kind: .deinitializer)])]
+        #expect(report(types, scanning: [.method, .initializer, .subscript]).candidates.isEmpty)
+    }
+
+    /// The `isEntryPoint` rules are the member's, not the method's: each exemption that spares a
+    /// method spares an initializer too.
+    @Test func theSameEntryPointRulesExemptAnInitializer() {
+        let types = [widget([
+            member("init", kind: .initializer, access: .public),
+            member("init", kind: .initializer, modifiers: [.override]),
+            member("init", kind: .initializer, modifiers: [.abstract]),
+            member("init", kind: .initializer, annotations: ["@Test"])
+        ])]
+        let scan = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: types),
+            languages: LanguageConfigurationResolver(
+                single: LanguageConfiguration(
+                    entryPointMarkers: EntryPointMarkers(annotations: ["test"]),
+                    deadCodeMemberKinds: [.method, .initializer])))
+        #expect(scan.report.candidates.isEmpty)
+    }
+
+    /// A protocol-required `init` is a witness like any other requirement.
+    @Test func aProtocolRequiredInitializerIsAWitness() {
+        let proto = TypeDeclaration(
+            id: "Makeable", name: "Makeable", qualifiedName: "Makeable", kind: .protocol, accessLevel: .public,
+            members: [member("init", kind: .initializer, access: .public)],
+            location: SourceLocation(filePath: "Makeable.swift", line: 1, column: 1))
+        let tool = TypeDeclaration(
+            id: "Tool", name: "Tool", qualifiedName: "Tool", kind: .struct, accessLevel: .internal,
+            inheritedTypes: [TypeReference(name: "Makeable")],
+            members: [member("init", kind: .initializer)],
+            location: SourceLocation(filePath: "Tool.swift", line: 1, column: 1))
+        #expect(report([proto, tool], scanning: [.method, .initializer]).candidates.isEmpty)
+    }
+
+    /// A requirement witnesses its own kind only: an `init` requirement must not spare a *method*
+    /// that happens to be called `init`, which name-only matching would have done.
+    @Test func anInitializerRequirementDoesNotWitnessAMethodOfTheSameName() {
+        let proto = TypeDeclaration(
+            id: "Makeable", name: "Makeable", qualifiedName: "Makeable", kind: .protocol, accessLevel: .public,
+            members: [member("init", kind: .initializer, access: .public)],
+            location: SourceLocation(filePath: "Makeable.swift", line: 1, column: 1))
+        let tool = TypeDeclaration(
+            id: "Tool", name: "Tool", qualifiedName: "Tool", kind: .struct, accessLevel: .internal,
+            inheritedTypes: [TypeReference(name: "Makeable")],
+            members: [method("init")],
+            location: SourceLocation(filePath: "Tool.swift", line: 1, column: 1))
+        #expect(report([proto, tool]).candidates.map(\.id) == ["Tool.init()"])
+    }
+}
+
+@Suite("Dead-code conformance identity")
+struct DeadCodeConformanceIdentityTests {
+
+    private func method(_ name: String, access: AccessLevel = .private) -> Member {
+        Member(
+            name: name, kind: .method, accessLevel: access,
+            location: SourceLocation(filePath: "S.swift", line: 1, column: 1))
+    }
+
+    /// Enrichment rewrites the supertype to the nested protocol's canonical id, which the index must resolve.
+    @Test func aNestedProtocolsWitnessIsLive() {
+        let runnable = TypeDeclaration(
+            id: "Host.Runnable", name: "Runnable", qualifiedName: "Host.Runnable", kind: .protocol,
+            accessLevel: .public, members: [method("start", access: .public)],
+            location: SourceLocation(filePath: "Host.swift", line: 2, column: 1))
+        let host = TypeDeclaration(
+            id: "Host", name: "Host", qualifiedName: "Host", kind: .struct, accessLevel: .public,
+            nestedTypes: [runnable],
+            location: SourceLocation(filePath: "Host.swift", line: 1, column: 1))
+        let tool = TypeDeclaration(
+            id: "Tool", name: "Tool", qualifiedName: "Tool", kind: .struct, accessLevel: .internal,
+            inheritedTypes: [TypeReference(name: "Host.Runnable")],
+            members: [method("start"), method("orphan")],
+            location: SourceLocation(filePath: "Tool.swift", line: 1, column: 1))
+        let artifact = CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [host, tool])
+        let report = DeadCodeScan(
+            artifact: artifact.enriched(configuration: LanguageConfiguration()),
+            languages: LanguageConfigurationResolver(single: LanguageConfiguration())).report
+        #expect(report.candidates.map(\.memberName) == ["orphan"])
+    }
+
+    @Test func aConformanceMarkerSparesOnlyTheConformingTypesMember() {
+        let markers = EntryPointMarkers(conformanceMembers: ["ParsableCommand": ["run"]])
+        let command = TypeDeclaration(
+            id: "Build", name: "Build", qualifiedName: "Build", kind: .struct, accessLevel: .internal,
+            inheritedTypes: [TypeReference(name: "ParsableCommand")], members: [method("run")],
+            location: SourceLocation(filePath: "Build.swift", line: 1, column: 1))
+        let scheduler = TypeDeclaration(
+            id: "Scheduler", name: "Scheduler", qualifiedName: "Scheduler", kind: .class,
+            accessLevel: .internal, members: [method("run")],
+            location: SourceLocation(filePath: "Scheduler.swift", line: 1, column: 1))
+        let report = DeadCodeScan(
+            artifact: CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [command, scheduler]),
+            languages: LanguageConfigurationResolver(
+                single: LanguageConfiguration(entryPointMarkers: markers))).report
+        #expect(report.candidates.map(\.id) == ["Scheduler.run()"])
+    }
+
+    @Test func aConformanceMarkerFollowsAnInArtifactSupertype() {
+        let markers = EntryPointMarkers(conformanceMembers: ["ParsableCommand": ["run"]])
+        let base = TypeDeclaration(
+            id: "App.Subcommand", name: "Subcommand", qualifiedName: "App.Subcommand", kind: .protocol,
+            accessLevel: .public, inheritedTypes: [TypeReference(name: "ParsableCommand")],
+            location: SourceLocation(filePath: "App.swift", line: 2, column: 1))
+        let app = TypeDeclaration(
+            id: "App", name: "App", qualifiedName: "App", kind: .struct, accessLevel: .public,
+            nestedTypes: [base], location: SourceLocation(filePath: "App.swift", line: 1, column: 1))
+        let build = TypeDeclaration(
+            id: "Build", name: "Build", qualifiedName: "Build", kind: .struct, accessLevel: .internal,
+            inheritedTypes: [TypeReference(name: "App.Subcommand")], members: [method("run")],
+            location: SourceLocation(filePath: "Build.swift", line: 1, column: 1))
+        let artifact = CodeArtifact(metadata: .init(sourceLanguage: .swift), types: [app, build])
+        let report = DeadCodeScan(
+            artifact: artifact.enriched(configuration: LanguageConfiguration()),
+            languages: LanguageConfigurationResolver(
+                single: LanguageConfiguration(entryPointMarkers: markers))).report
+        #expect(report.candidates.isEmpty)
+    }
+}
+
+private struct SubscriptScanningParser: CodeParser {
+    let language = CodeArtifact.SourceLanguage(rawValue: "subscriptScanning")
+    let fileExtensions: [String] = []
+    let configuration = LanguageConfiguration(deadCodeMemberKinds: [.method, .subscript])
+
+    func parse(source: String, fileName: String) -> CodeArtifact {
+        CodeArtifact(metadata: .init(sourceLanguage: language))
+    }
+}

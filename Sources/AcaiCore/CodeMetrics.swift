@@ -1,0 +1,352 @@
+// Static-analysis metrics derived from an (enriched) `CodeArtifact`:
+// concept counts, per-module coupling (Robert Martin's Ca/Ce/I/A) and classic
+// OO per-type metrics (DIT, NOC, WMC, fan-in/out).
+
+public struct CodeMetrics: Codable, Equatable, Sendable {
+    public var counts: Counts
+    public var modules: [ModuleCoupling]
+    public var types: [TypeMetric]
+
+    public init(counts: Counts, modules: [ModuleCoupling], types: [TypeMetric]) {
+        self.counts = counts
+        self.modules = modules
+        self.types = types
+    }
+
+    /// Concept counts across the whole artifact (types counted incl. nested).
+    public struct Counts: Codable, Equatable, Sendable {
+        public var totalTypes: Int
+        public var byKind: [String: Int]
+        public var protocols: Int
+        public var globalVariables: Int
+        public var freestandingFunctions: Int
+        public var methods: Int
+        public var properties: Int
+        public var relationships: Int
+        public var relationshipsByKind: [String: Int]
+        /// Physical lines of code across the whole artifact: the distinct lines its declarations
+        /// cover, so a nested type never counts twice. `0` when no parser supplied an extent.
+        public var linesOfCode: Int
+    }
+
+    /// Robert Martin package metrics, one entry per build module.
+    public struct ModuleCoupling: Codable, Equatable, Sendable {
+        public var name: String
+        public var typeCount: Int
+        /// Afferent coupling (Ca): external types that depend on this module.
+        public var afferentCoupling: Int
+        /// Efferent coupling (Ce): external types this module depends on.
+        public var efferentCoupling: Int
+        /// Instability `I = Ce / (Ca + Ce)` (0 = stable, 1 = unstable).
+        public var instability: Double
+        /// Abstractness `A = abstractTypes / totalTypes`.
+        public var abstractness: Double
+        /// Distance from the main sequence `D = |A + I - 1|` (0 = on the sequence, 1 = worst).
+        public var distanceFromMainSequence: Double
+        /// Public/open members across the module's types — the module's outward API surface.
+        public var publicMemberCount: Int
+        /// Stable-Dependencies-Principle breaches: modules this one depends on that are *less* stable
+        /// (higher instability) — not a cycle, so cycle detection misses it. Sorted; empty when the
+        /// module only depends on equally- or more-stable ones.
+        public var stableDependencyViolations: [String]
+        /// Physical lines of code in this module's own files. Attributed by the file each
+        /// declaration was written in, so a cross-module extension counts toward the module that
+        /// declares it, matching how the coupling numbers above are attributed. These rows exist only
+        /// for modules that declare types, so their sum can fall short of `Counts.linesOfCode`.
+        public var linesOfCode: Int
+    }
+
+    public struct TypeMetric: Codable, Equatable, Sendable {
+        public var id: String
+        public var name: String
+        /// The build module the type is declared in (type ids are not module-qualified).
+        public var module: String
+        /// Depth of inheritance tree (longest in-codebase inheritance/conformance chain).
+        public var depthOfInheritance: Int
+        /// Number of children (direct in-codebase subtypes/conformers).
+        public var numberOfChildren: Int
+        /// Weighted methods per class (WMC): the sum of cyclomatic complexity over the type's methods
+        /// and initialisers, counting an unmeasured body as 1. `numberOfMethods` is the plain count.
+        public var weightedMethods: Int
+        /// The plain count of declared methods, which `weightedMethods` weights by complexity.
+        public var numberOfMethods: Int
+        /// Highest cyclomatic complexity of any single method (0 when none measured) — surfaces the one
+        /// gnarly method `weightedMethods` sums away.
+        public var maxCyclomaticComplexity: Int
+        /// Stored/computed property count — the data half of the anemic-vs-behaviour balance.
+        public var numberOfProperties: Int
+        public var fanIn: Int
+        public var fanOut: Int
+        /// Response For a Class: declared methods + distinct call targets in member bodies (see
+        /// `ResponseForClass`). High RFC = a large response set, costly to test and reason about.
+        public var responseForClass: Int
+        /// Public/open members — the type's outward API surface.
+        public var publicMemberCount: Int
+        /// Fraction of members that are public/open (0 when the type has no members).
+        public var publicMemberRatio: Double
+        /// Publicly settable stored properties — mutable public state that breaks encapsulation.
+        public var mutablePublicState: Int
+        /// Largest parameter count of any callable member — the long-parameter-list smell.
+        public var maxParameters: Int
+        public var meanParameters: Double
+        /// Data-class / anemic score: `properties / (properties + methods)` (1 = pure data).
+        public var dataClassScore: Double
+        /// Members that `override` an inherited member — refused-bequest candidates.
+        public var overrideCount: Int
+        /// Depth of the nested-type tree rooted at this type (0 when it declares no nested types).
+        public var nestingDepth: Int
+        /// LCOM4-style lack of cohesion: connected components among the type's methods (1 = cohesive;
+        /// higher = several unrelated responsibilities). See ``LcomAnalysis``.
+        public var lackOfCohesion: Int
+        /// Methods more interested in another declared type than their own — feature envy. See
+        /// `FeatureEnvy`.
+        public var featureEnvyMethods: Int
+
+        /// Deep-and-wide inheritance shape (`DIT × NOC`): deeply derived and widely subclassed marks a
+        /// fragile hierarchy hub. Filled from `depthOfInheritance × numberOfChildren` (see ``InheritanceShape``).
+        public var deepAndWide: Int
+
+        /// Physical lines of code: the distinct lines the declaration and its members cover,
+        /// including members merged in from extensions in other files. `0` when the parser supplied
+        /// no extent, so an aggregate can tell an unmeasured type from an empty one.
+        public var linesOfCode: Int
+    }
+}
+
+extension CodeArtifact {
+
+    /// Call on an `enriched()` artifact so relationship endpoints are resolved to type ids.
+    public func computeMetrics() -> CodeMetrics {
+        computeMetrics(modules: ModuleMap(artifact: self))
+    }
+
+    public func computeMetrics(modules: ModuleMap) -> CodeMetrics {
+        let flat = types.flattenedTree(counting: nil)
+        let identity = TypeIdentityResolver(types: types)
+        let spans = declarationSpans
+        return CodeMetrics(
+            counts: computeCounts(flat: flat, spans: spans),
+            modules: computeModuleCoupling(flat: flat, identity: identity, spans: spans, modules: modules),
+            types: computeTypeMetrics(flat: flat, identity: identity, modules: modules)
+        )
+    }
+
+    /// Every line the artifact's declarations occupy, measured over the original (un-flattened)
+    /// tree so a nested type's lines are not counted again for its parent. Free functions and
+    /// module-scope variables are included, so a script-shaped file still reports its size.
+    private var declarationSpans: LineSpanUnion {
+        var union = LineSpanUnion()
+        for type in types { union.formUnion(type.lineSpans) }
+        for function in freestandingFunctions { union.add(function.location) }
+        for variable in globalVariables { union.add(variable.location) }
+        return union
+    }
+
+    private func computeCounts(flat: [TypeDeclaration], spans: LineSpanUnion) -> CodeMetrics.Counts {
+        var byKind: [String: Int] = [:]
+        var methodCount = 0
+        var propertyCount = 0
+        for type in flat {
+            byKind[type.kind.rawValue, default: 0] += 1
+            for member in type.members {
+                switch member.kind {
+                case .property:
+                    propertyCount += 1
+                case .method, .initializer, .deinitializer, .subscript:
+                    methodCount += 1
+                }
+            }
+        }
+        var relByKind: [String: Int] = [:]
+        for rel in relationships { relByKind[rel.kind.rawValue, default: 0] += 1 }
+
+        return CodeMetrics.Counts(
+            totalTypes: flat.count,
+            byKind: byKind,
+            protocols: byKind[TypeKind.protocol.rawValue, default: 0],
+            globalVariables: globalVariables.count,
+            freestandingFunctions: freestandingFunctions.count,
+            methods: methodCount,
+            properties: propertyCount,
+            relationships: relationships.count,
+            relationshipsByKind: relByKind,
+            linesOfCode: spans.lineCount
+        )
+    }
+
+    private func computeTypeMetrics(
+        flat: [TypeDeclaration], identity: TypeIdentityResolver, modules: ModuleMap
+    ) -> [CodeMetrics.TypeMetric] {
+        let shape = InheritanceShape(types: flat, relationships: relationships)
+        let (fanIn, fanOut) = fanMetrics(flat: flat, identity: identity)
+        // Measured over the original (un-flattened) tree since flattening clears `nestedTypes`.
+        let nesting = nestingDepths(types)
+        return flat.map { type in
+            CodeMetrics.TypeMetric(
+                id: type.id,
+                name: type.qualifiedName,
+                module: modules.module(forFilePath: type.location?.filePath ?? ""),
+                depthOfInheritance: shape.depth(of: type.id),
+                numberOfChildren: shape.children(of: type.id),
+                weightedMethods: type.weightedMethodComplexity,
+                numberOfMethods: type.numberOfMethods,
+                maxCyclomaticComplexity: type.members.compactMap(\.cyclomaticComplexity).max() ?? 0,
+                numberOfProperties: type.members.filter { $0.kind == .property }.count,
+                fanIn: fanIn[type.id]?.count ?? 0,
+                fanOut: fanOut[type.id]?.count ?? 0,
+                responseForClass: ResponseForClass(type: type).count,
+                publicMemberCount: type.publicMemberCount,
+                publicMemberRatio: type.publicMemberRatio,
+                mutablePublicState: type.mutablePublicState,
+                maxParameters: type.maxParameters,
+                meanParameters: type.meanParameters,
+                dataClassScore: type.dataClassScore,
+                overrideCount: type.overrideCount,
+                nestingDepth: nesting[type.id] ?? 0,
+                lackOfCohesion: LcomAnalysis(type: type).componentCount,
+                featureEnvyMethods: FeatureEnvy(type: type, identity: identity).enviousMethodCount,
+                deepAndWide: shape.deepAndWide(of: type.id),
+                linesOfCode: type.linesOfCode
+            )
+        }
+    }
+
+    /// Subtree nesting depth per type id, over the original (un-flattened) `types` tree.
+    private func nestingDepths(_ roots: [TypeDeclaration]) -> [String: Int] {
+        var result: [String: Int] = [:]
+        for type in roots {
+            result[type.id] = type.nestingDepth
+            result.merge(nestingDepths(type.nestedTypes)) { current, _ in current }
+        }
+        return result
+    }
+
+    /// Per-type fan-in/fan-out sets: signature edges (dependency/composition/aggregation/association)
+    /// plus construction/body dependencies not visible in signatures (e.g. a factory constructing the type).
+    private func fanMetrics(
+        flat: [TypeDeclaration], identity: TypeIdentityResolver
+    ) -> (fanIn: [String: Set<String>], fanOut: [String: Set<String>]) {
+        let depKinds: Set<Relationship.Kind> = [.dependency, .composition, .aggregation, .association]
+        var fanOut: [String: Set<String>] = [:]
+        var fanIn: [String: Set<String>] = [:]
+        for edge in relationships where depKinds.contains(edge.kind) {
+            fanOut[edge.source, default: []].insert(edge.target)
+            fanIn[edge.target, default: []].insert(edge.source)
+        }
+        for type in flat {
+            for member in type.members {
+                for name in member.referencedTypeNames {
+                    guard let target = identity.resolvedID(for: name)?.value, target != type.id else { continue }
+                    fanOut[type.id, default: []].insert(target)
+                    fanIn[target, default: []].insert(type.id)
+                }
+            }
+        }
+        return (fanIn, fanOut)
+    }
+
+    private func computeModuleCoupling(
+        flat: [TypeDeclaration], identity: TypeIdentityResolver, spans: LineSpanUnion, modules: ModuleMap
+    ) -> [CodeMetrics.ModuleCoupling] {
+        let idToModule = modules.modules(ofTypes: flat)
+        var moduleTypes: [String: [TypeDeclaration]] = [:]
+        // By each type's own file, not `idToModule`: two types sharing an id each count in their module.
+        for type in flat {
+            moduleTypes[modules.module(forFilePath: type.location?.filePath ?? ""), default: []].append(type)
+        }
+        // Attributes each edge's source to its declaring module, so a cross-module extension counts
+        // toward the extension's module, not the extended type's.
+        let attribution = ModuleAttribution(modules: modules, idToModule: idToModule)
+        var sets = ModuleCouplingSets()
+        for edge in relationships {
+            guard let sourceModule = attribution.sourceModule(of: edge),
+                  let targetModule = attribution.targetModule(of: edge),
+                  sourceModule != targetModule
+            else { continue }
+            sets.record(sourceModule: sourceModule, targetModule: targetModule,
+                        edgeTarget: edge.target, edgeSource: edge.source)
+        }
+        addBodyReferenceCoupling(
+            flat: flat, identity: identity, idToModule: idToModule, modules: modules, into: &sets)
+
+        return moduleCouplings(moduleTypes: moduleTypes, sets: sets, spans: spans, modules: modules)
+    }
+
+    /// Construction/body dependencies between modules. Source is the member's declaring file (so an
+    /// extension on a foreign type counts toward the extension's module), target is the referenced
+    /// type's module.
+    private func addBodyReferenceCoupling(
+        flat: [TypeDeclaration], identity: TypeIdentityResolver, idToModule: [String: String],
+        modules: ModuleMap, into sets: inout ModuleCouplingSets
+    ) {
+        for type in flat {
+            for member in type.members {
+                let sourceModule = modules.module(
+                    forFilePath: member.location?.filePath ?? type.location?.filePath ?? "")
+                for name in member.referencedTypeNames {
+                    guard let target = identity.resolvedID(for: name)?.value, let targetModule = idToModule[target],
+                          sourceModule != targetModule
+                    else { continue }
+                    sets.record(sourceModule: sourceModule, targetModule: targetModule,
+                                edgeTarget: target, edgeSource: type.id)
+                }
+            }
+        }
+    }
+
+    private func moduleCouplings(
+        moduleTypes: [String: [TypeDeclaration]], sets: ModuleCouplingSets, spans: LineSpanUnion,
+        modules: ModuleMap
+    ) -> [CodeMetrics.ModuleCoupling] {
+        let linesByModule = spans.lineCounts(groupedBy: { modules.module(forFilePath: $0) })
+        let efferent = sets.efferent
+        let afferent = sets.afferent
+        let moduleAdjacency = sets.moduleAdjacency
+        func instability(of module: String) -> Double {
+            let total = (efferent[module]?.count ?? 0) + (afferent[module]?.count ?? 0)
+            return total == 0 ? 0 : Double(efferent[module]?.count ?? 0) / Double(total)
+        }
+        return moduleTypes.keys.sorted().map { name in
+            let moduleTypeList = moduleTypes[name] ?? []
+            let efferentCount = efferent[name]?.count ?? 0
+            let afferentCount = afferent[name]?.count ?? 0
+            // Abstract types per Martin's metric = interfaces/protocols and abstract classes
+            // (the `.abstract` modifier covers languages like Dart with no dedicated protocol kind).
+            let abstractCount = moduleTypeList.filter {
+                $0.kind == .protocol || $0.kind == .interface || $0.modifiers.contains(.abstract)
+            }.count
+            let instabilityValue = instability(of: name)
+            let abstractness = moduleTypeList.isEmpty ? 0 : Double(abstractCount) / Double(moduleTypeList.count)
+            // SDP breach: a dependency on a *less*-stable module (strictly higher instability).
+            let violations = (moduleAdjacency[name] ?? []).filter { instability(of: $0) > instabilityValue }.sorted()
+            return CodeMetrics.ModuleCoupling(
+                name: name,
+                typeCount: moduleTypeList.count,
+                afferentCoupling: afferentCount,
+                efferentCoupling: efferentCount,
+                instability: instabilityValue,
+                abstractness: abstractness,
+                distanceFromMainSequence: abs(abstractness + instabilityValue - 1),
+                publicMemberCount: moduleTypeList.reduce(0) { $0 + $1.publicMemberCount },
+                stableDependencyViolations: violations,
+                linesOfCode: linesByModule[name, default: 0]
+            )
+        }
+    }
+}
+
+/// Mutable coupling sets accumulated while walking the artifact's edges: per-module efferent/afferent
+/// type ids (Martin's Ce/Ca) plus the module adjacency the Stable-Dependencies check reads.
+private struct ModuleCouplingSets {
+    var efferent: [String: Set<String>] = [:]
+    var afferent: [String: Set<String>] = [:]
+    var moduleAdjacency: [String: Set<String>] = [:]
+
+    /// Records one cross-module edge: `edgeTarget`/`edgeSource` are the type ids, `sourceModule`/
+    /// `targetModule` their modules (already known to differ).
+    mutating func record(sourceModule: String, targetModule: String, edgeTarget: String, edgeSource: String) {
+        efferent[sourceModule, default: []].insert(edgeTarget)
+        afferent[targetModule, default: []].insert(edgeSource)
+        moduleAdjacency[sourceModule, default: []].insert(targetModule)
+    }
+}

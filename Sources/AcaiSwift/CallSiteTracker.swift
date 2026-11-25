@@ -1,0 +1,371 @@
+import SwiftSyntax
+import AcaiCore
+
+/// Where a `FunctionCallExprSyntax` was found: inside a function/closure body, at bare top-level
+/// script scope, or neither (e.g. a default parameter value) — a call `recordCallSite` attaches
+/// nowhere.
+enum CallSiteScope {
+    case functionBody
+    case fileScope
+    case other
+}
+
+/// Owns everything `DeclarationVisitor` needs to collect call sites, assignments and field reads
+/// while it walks a file. Expression-shape interpretation stays in `CallSiteCollector` (held here,
+/// stateless); this is the traversal-state counterpart the visitor drives through push/pop and
+/// begin/end calls, supplying the type/member context it doesn't own itself.
+final class CallSiteTracker {
+    private(set) var callSiteState = CallSiteAccumulator()
+    private(set) var topLevelCallSites: [CallSite] = []
+    private(set) var topLevelGlobalReceiverOriginMap: [String: CallReceiver] = [:]
+
+    private var pendingLocalBindingsStack: [[(name: String, origin: LocalBindingOrigin)]] = []
+    private var pendingConditionBindingsStack: [(name: String, origin: LocalBindingOrigin)?] = []
+
+    /// Mirrors `DeclarationVisitor.typeStack`: each type's `methodName → returnType` map, pre-passed so
+    /// a forward-declared method's return type is seen too.
+    private var methodReturnTypeMapStack: [[String: String]] = []
+    /// Mirrors `DeclarationVisitor.typeStack`: each type's own method names with an ambiguous
+    /// (multi-)return-type overload, so those are never mistaken for a cross-file method and deferred.
+    private var ambiguousReturnTypeMethodNamesStack: [Set<String>] = []
+    private var methodNameMapStack: [Set<String>] = []
+
+    let callSites: CallSiteCollector
+    private let signatures = DeclarationSignatureExtractor()
+    private let sourceLocations: SourceLocationResolver
+
+    init(knownTypeNames: Set<String>, builtInTypeNames: Set<String>, sourceLocations: SourceLocationResolver) {
+        self.callSites = CallSiteCollector(
+            knownTypeNames: knownTypeNames, builtInTypeNames: builtInTypeNames, sourceLocations: sourceLocations)
+        self.sourceLocations = sourceLocations
+    }
+
+    private var currentMethodReturnTypes: [String: String] { methodReturnTypeMapStack.last ?? [:] }
+    private var currentAmbiguousReturnTypeMethodNames: Set<String> { ambiguousReturnTypeMethodNamesStack.last ?? [] }
+    var currentMethodNames: Set<String> { methodNameMapStack.last ?? [] }
+
+    // MARK: - Type scope, driven by `DeclarationVisitor.pushType`/`popType`
+
+    func pushTypeScope(memberBlock: MemberBlockSyntax) {
+        let returnTypes = returnTypes(in: memberBlock)
+        methodReturnTypeMapStack.append(returnTypes.resolved)
+        // Tracked apart from the resolved map so an overloaded name is never deferred to the
+        // post-merge pass, which resolves per-type and would otherwise guess.
+        ambiguousReturnTypeMethodNamesStack.append(returnTypes.ambiguous)
+        methodNameMapStack.append(methodNames(from: memberBlock))
+    }
+
+    func popTypeScope() {
+        methodReturnTypeMapStack.removeLast()
+        ambiguousReturnTypeMethodNamesStack.removeLast()
+        methodNameMapStack.removeLast()
+    }
+
+    /// A raw pre-pass over the type's direct member list, so a forward-declared method's return
+    /// type is seen regardless of source order.
+    private func returnTypes(in memberBlock: MemberBlockSyntax) -> UnambiguousTypeNames {
+        var returnTypes = UnambiguousTypeNames()
+        for item in memberBlock.members {
+            guard let function = item.decl.as(FunctionDeclSyntax.self),
+                  let returnClause = function.signature.returnClause,
+                  let name = callSites.simpleIdentifierTypeName(from: returnClause.type)
+            else { continue }
+            returnTypes.record(name, for: function.name.text)
+        }
+        return returnTypes
+    }
+
+    private func methodNames(from memberBlock: MemberBlockSyntax) -> Set<String> {
+        Set(memberBlock.members.compactMap { $0.decl.as(FunctionDeclSyntax.self)?.name.text })
+    }
+
+    // MARK: - Function-body state
+
+    func resetCallSiteState(
+        propertyMap: [String: String], arrayElementPropertyMap: [String: String],
+        parameterClause: FunctionParameterClauseSyntax, fieldReadScope: FieldReadScope
+    ) {
+        callSiteState = CallSiteAccumulator(
+            fieldReadScope: fieldReadScope,
+            propertyMap: propertyMap,
+            arrayElementPropertyMap: arrayElementPropertyMap,
+            parameterMap: parameterMap(from: parameterClause),
+            knownLocalNames: knownParameterNames(from: parameterClause)
+        )
+    }
+
+    /// The field-read scope of a member declared in the innermost type, over the names `node` declares.
+    func fieldReadScope(
+        propertyMap: [String: String], declaredIn node: some SyntaxProtocol, isExtension: Bool
+    ) -> FieldReadScope {
+        FieldReadScope(
+            propertyMap: propertyMap, declaredNames: DeclaredNames(in: node).names,
+            methodNames: currentMethodNames, defersUnknownNames: isExtension)
+    }
+
+    func clearCallSiteState() {
+        callSiteState = CallSiteAccumulator()
+    }
+
+    private func parameterMap(from parameterClause: FunctionParameterClauseSyntax) -> [String: String] {
+        var map: [String: String] = [:]
+        for parameter in signatures.extractParameters(from: parameterClause) {
+            if let typeName = parameter.type?.name {
+                map[parameter.internalName] = typeName
+            }
+        }
+        return map
+    }
+
+    private func knownParameterNames(from parameterClause: FunctionParameterClauseSyntax) -> Set<String> {
+        Set(signatures.extractParameters(from: parameterClause).map(\.internalName))
+    }
+
+    func mergeNestedFunctionParameters(from parameterClause: FunctionParameterClauseSyntax) {
+        for parameter in signatures.extractParameters(from: parameterClause) {
+            callSiteState.knownLocalNames.insert(parameter.internalName)
+            if let typeName = parameter.type?.name {
+                callSiteState.parameterMap[parameter.internalName] = typeName
+            }
+        }
+    }
+
+    // MARK: - Local & condition bindings
+
+    /// Records every binding's name into `knownLocalNames` immediately, and defers the bindings whose
+    /// origin could also be resolved until `endLocalBindings()`, once their initializer has been fully
+    /// visited: Swift scoping doesn't put a name in scope until its own initializer finishes, so `let
+    /// size = size(for: id)` must resolve the RHS against the outer `size` method, not the
+    /// not-yet-in-scope local.
+    func beginLocalBindings(_ bindings: PatternBindingListSyntax) {
+        pendingLocalBindingsStack.append(recordingKnownLocalNames(from: bindings))
+    }
+
+    func endLocalBindings() {
+        for local in pendingLocalBindingsStack.removeLast() {
+            recordLocalBindingOrigin(local)
+        }
+    }
+
+    /// The `guard let x = …` / `if let x = …` analogue of `beginLocalBindings`: a shadowing initializer
+    /// (`guard let self = self else { return }`) must resolve its RHS `self` against the outer scope,
+    /// not the new local, hence the same deferral until `endConditionBinding()`.
+    func beginConditionBinding(_ node: OptionalBindingConditionSyntax) {
+        record(callSites.fieldRead(from: node, in: callSiteState.fieldReadScope))
+        pendingConditionBindingsStack.append(resolvingConditionBinding(from: node))
+    }
+
+    func endConditionBinding() {
+        if let local = pendingConditionBindingsStack.removeLast() {
+            recordLocalBindingOrigin(local)
+        }
+    }
+
+    private func recordingKnownLocalNames(
+        from bindings: PatternBindingListSyntax
+    ) -> [(name: String, origin: LocalBindingOrigin)] {
+        let returnTypes = currentMethodReturnTypes
+        let ambiguousMethodNames = currentAmbiguousReturnTypeMethodNames
+        var newLocals: [(name: String, origin: LocalBindingOrigin)] = []
+        for binding in bindings {
+            if let name = binding.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+                callSiteState.knownLocalNames.insert(name)
+            }
+            if let local = callSites.localBinding(
+                from: binding, methodReturnTypes: returnTypes, ambiguousMethodNames: ambiguousMethodNames) {
+                newLocals.append(local)
+            }
+        }
+        return newLocals
+    }
+
+    private func resolvingConditionBinding(
+        from node: OptionalBindingConditionSyntax
+    ) -> (name: String, origin: LocalBindingOrigin)? {
+        if let name = node.pattern.as(IdentifierPatternSyntax.self)?.identifier.text {
+            callSiteState.knownLocalNames.insert(name)
+        }
+        return callSites.localBinding(
+            from: node, methodReturnTypes: currentMethodReturnTypes,
+            ambiguousMethodNames: currentAmbiguousReturnTypeMethodNames)
+    }
+
+    private func recordLocalBindingOrigin(_ local: (name: String, origin: LocalBindingOrigin)) {
+        switch local.origin {
+        case .concrete(let type):
+            callSiteState.localMap[local.name] = type
+        case .deferred(let receiver):
+            callSiteState.localReceiverOriginMap[local.name] = receiver
+        }
+    }
+
+    // MARK: - Top-level (script-style) call collection
+
+    func recordTopLevelGlobalReceiverOrigins(from bindings: PatternBindingListSyntax) {
+        for binding in bindings {
+            guard let local = callSites.localBinding(from: binding), case .deferred(let receiver) = local.origin
+            else { continue }
+            topLevelGlobalReceiverOriginMap[local.name] = receiver
+        }
+    }
+
+    // MARK: - Property-accessor / initializer call sites
+
+    /// Call sites and field reads gathered from every accessor body of a type-level `var`/`let`
+    /// declaration, so a method reached only from a computed property (a SwiftUI `body`, a derived
+    /// value) is not mistaken for dead code, and the property joins its fields' cohesion cluster.
+    func accessorAnalysis(
+        from node: VariableDeclSyntax, propertyMap: [String: String], enclosingTypeName: String?,
+        isExtension: Bool
+    ) -> PropertyBodyAnalysis {
+        var analysis = PropertyBodyAnalysis()
+        for binding in node.bindings {
+            guard let accessor = binding.accessorBlock else { continue }
+            let readScope = fieldReadScope(propertyMap: propertyMap, declaredIn: accessor, isExtension: isExtension)
+            let walker = propertyCallSiteWalker(
+                propertyMap: propertyMap, enclosingTypeName: enclosingTypeName, fieldReadScope: readScope)
+            walker.walk(accessor)
+            analysis.callSites.append(contentsOf: walker.collected)
+            analysis.fieldReads.append(contentsOf: walker.fieldReads)
+            analysis.deferredFieldReads.append(contentsOf: walker.deferredFieldReads)
+        }
+        return analysis
+    }
+
+    /// The initializer-expression analogue of `accessorCallSites` (`static let light = make(isDark:
+    /// false)`), which only walks computed accessor bodies. Without this, a call made only from a
+    /// stored property's initializer is invisible to the call graph.
+    func initializerCallSites(
+        from node: VariableDeclSyntax, propertyMap: [String: String], enclosingTypeName: String?
+    ) -> [CallSite] {
+        var sites: [CallSite] = []
+        for binding in node.bindings {
+            guard let value = binding.initializer?.value else { continue }
+            let walker = propertyCallSiteWalker(
+                propertyMap: propertyMap, enclosingTypeName: enclosingTypeName)
+            walker.walk(value)
+            sites.append(contentsOf: walker.collected)
+        }
+        return sites
+    }
+
+    private func propertyCallSiteWalker(
+        propertyMap: [String: String], enclosingTypeName: String?, fieldReadScope: FieldReadScope? = nil
+    ) -> AccessorCallSiteWalker {
+        AccessorCallSiteWalker(
+            collector: callSites, propertyMap: propertyMap, enclosingTypeName: enclosingTypeName,
+            methodReturnTypes: currentMethodReturnTypes, methodNames: currentMethodNames,
+            fieldReadScope: fieldReadScope)
+    }
+
+    // MARK: - Call-Site, Assignment & Field-Read Recording
+
+    func recordCallSite(
+        from node: FunctionCallExprSyntax, scope: CallSiteScope,
+        enclosingTypeName: String?, topLevelGlobalPropertyMap: @autoclosure () -> [String: String]
+    ) {
+        switch scope {
+        case .functionBody:
+            recordIterationClosureCallSites(in: node, enclosingTypeName: enclosingTypeName)
+            // Parameters and locals resolve receivers too, but must not leak into field-read
+            // detection, so they're merged in only here (shadowing same-named stored properties and
+            // each other).
+            var receiverMap = callSiteState.propertyMap
+            if !callSiteState.parameterMap.isEmpty {
+                receiverMap.merge(callSiteState.parameterMap) { _, parameter in parameter }
+            }
+            if !callSiteState.localMap.isEmpty {
+                receiverMap.merge(callSiteState.localMap) { _, local in local }
+            }
+            if let site = callSites.callSite(
+                from: node, propertyMap: receiverMap, enclosingTypeName: enclosingTypeName,
+                knownLocalNames: callSiteState.knownLocalNames) ?? callSites.deferredCallSite(
+                    from: node, localReceiverOriginMap: callSiteState.localReceiverOriginMap) {
+                callSiteState.pendingCallSites.append(site)
+            }
+        case .fileScope:
+            if let site = callSites.callSite(
+                from: node, propertyMap: topLevelGlobalPropertyMap(), enclosingTypeName: nil)
+                ?? callSites.deferredCallSite(
+                    from: node, localReceiverOriginMap: topLevelGlobalReceiverOriginMap) {
+                // Its calls have nowhere to attach as a member, so they're recorded separately and
+                // given a synthetic reachable member in `buildArtifact()`.
+                topLevelCallSites.append(site)
+            }
+        case .other:
+            break
+        }
+    }
+
+    /// The `subscriptCallSite`-producing analogue of `recordCallSite`: no deferred/iteration-closure
+    /// resolution, since `CallSiteCollector.subscriptCallSite` never defers — it either resolves now
+    /// or is dropped.
+    func recordSubscriptCallSite(
+        from node: SubscriptCallExprSyntax, scope: CallSiteScope,
+        enclosingTypeName: String?, topLevelGlobalPropertyMap: @autoclosure () -> [String: String]
+    ) {
+        switch scope {
+        case .functionBody:
+            var receiverMap = callSiteState.propertyMap
+            if !callSiteState.parameterMap.isEmpty {
+                receiverMap.merge(callSiteState.parameterMap) { _, parameter in parameter }
+            }
+            if !callSiteState.localMap.isEmpty {
+                receiverMap.merge(callSiteState.localMap) { _, local in local }
+            }
+            if let site = callSites.subscriptCallSite(
+                from: node, propertyMap: receiverMap, enclosingTypeName: enclosingTypeName,
+                knownLocalNames: callSiteState.knownLocalNames) {
+                callSiteState.pendingCallSites.append(site)
+            }
+        case .fileScope:
+            if let site = callSites.subscriptCallSite(
+                from: node, propertyMap: topLevelGlobalPropertyMap(), enclosingTypeName: nil) {
+                topLevelCallSites.append(site)
+            }
+        case .other:
+            break
+        }
+    }
+
+    func recordAssignment(from node: SequenceExprSyntax) {
+        guard let assignment = callSites.assignment(from: node) else { return }
+        callSiteState.pendingAssignments.append(assignment)
+    }
+
+    private func record(_ read: FieldRead?) {
+        switch read {
+        case .resolved(let access):
+            callSiteState.pendingFieldReads.append(access)
+        case .deferred(let access):
+            callSiteState.pendingDeferredFieldReads.append(access)
+        case nil:
+            break
+        }
+    }
+
+    func recordFieldReadAndMethodReference(from node: DeclReferenceExprSyntax) {
+        record(callSites.fieldRead(from: node, in: callSiteState.fieldReadScope))
+        if callSites.isBareReferenceUse(node),
+           let site = callSites.methodReference(
+            from: node, propertyMap: callSiteState.propertyMap, methodNames: currentMethodNames) {
+            callSiteState.pendingCallSites.append(site)
+        }
+    }
+
+    /// Binds an implicit-`$0` iteration closure's parameter to the iterated array property's element
+    /// type (`addedRelationships.map { $0.reportPhrase() }`). A no-op when `node` isn't such a closure
+    /// or its receiver isn't a resolvable array property.
+    private func recordIterationClosureCallSites(
+        in node: FunctionCallExprSyntax, enclosingTypeName: String?
+    ) {
+        guard let (receiverBase, closure) = callSites.iterationClosure(in: node),
+              let elementReceiver = callSites.arrayElementReceiverType(
+                of: receiverBase, arrayElementPropertyMap: callSiteState.arrayElementPropertyMap,
+                enclosingTypeName: enclosingTypeName, knownLocalNames: callSiteState.knownLocalNames)
+        else { return }
+        let walker = Closure0CallSiteWalker(elementReceiver: elementReceiver, sourceLocations: sourceLocations)
+        walker.walk(closure)
+        callSiteState.pendingCallSites.append(contentsOf: walker.collected)
+    }
+}

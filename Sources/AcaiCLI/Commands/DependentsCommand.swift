@@ -1,0 +1,82 @@
+import ArgumentParser
+import AcaiCore
+import AcaiLibrary
+
+extension AcaiCommand {
+    struct Dependents: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            abstract: "Show the transitive dependents (blast radius) of a type"
+        )
+
+        @OptionGroup var artifactSource: ArtifactSource
+        @OptionGroup var generatedScope: GeneratedScopeOption
+
+        @Argument(help: "The type to analyze (simple name, qualified name, or id).")
+        var type: String
+
+        @Option(name: .long, help: "Limit reverse reachability to this many hops. Unlimited if omitted.")
+        var depth: Int?
+
+        @Option(name: .long, help: "Report format: json (default) or human.")
+        var format: ReportFormatOption = .json
+
+        @Option(name: .long, help: "Output file path. Prints to stdout if omitted.")
+        var output: String?
+
+        mutating func validate() throws {
+            try artifactSource.validate()
+        }
+
+        mutating func run() async throws {
+            let artifact = try await generatedScope.applied(to: artifactSource.resolve())
+            let report = ImpactAnalysis(artifact: artifact, rootType: type, maxDepth: depth).report
+
+            let rendered: String
+            switch format {
+            case .json:
+                let payload = DependentsPayload(impact: report, health: HealthCheck(artifact: artifact).summary)
+                rendered = try JSONReport(payload).text
+            case .human:
+                rendered = humanReport(report)
+            }
+            try rendered.writeOutput(to: output, label: "dependents")
+        }
+
+        private func humanReport(_ report: ImpactAnalysis.Report) -> String {
+            guard report.found else { return "Type '\(report.root)' not found.\n" }
+            var lines = ["\(report.root): \(report.blastRadius) transitive dependent(s)."]
+            for dependent in report.dependents {
+                lines.append("  \(dependent.qualifiedName)\(dependent.location.suffix)")
+            }
+            return lines.joined(separator: "\n") + "\n"
+        }
+    }
+
+    /// Deprecated alias for `dependents`, hidden from `--help` so no existing script breaks. Remove in
+    /// the next major release.
+    struct Impact: AsyncParsableCommand {
+        static let configuration = CommandConfiguration(
+            commandName: "impact",
+            abstract: "Deprecated alias for `dependents`.",
+            shouldDisplay: false
+        )
+
+        @OptionGroup var dependents: Dependents
+
+        mutating func validate() throws {
+            try dependents.validate()
+        }
+
+        mutating func run() async throws {
+            try await dependents.run()
+        }
+    }
+}
+
+/// `health` lets a consumer of `acai dependents --format json` tell whether the blast radius rests on a
+/// trustworthy parse without a separate `acai analyze --health` round trip. The `impact` key is the
+/// published output shape, so it outlives the command's old name.
+private struct DependentsPayload: Encodable {
+    var impact: ImpactAnalysis.Report
+    var health: HealthCheck.Summary
+}

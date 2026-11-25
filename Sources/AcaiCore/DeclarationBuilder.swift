@@ -1,0 +1,148 @@
+/// The declarations a parser accumulates while walking one source file, and the naming discipline
+/// that turns them into a `CodeArtifact` satisfying the producer contract on ``CodeParser``.
+///
+/// In `AcaiCore` rather than `AcaiTreeSitter` because it names no `Node`.
+public struct DeclarationBuilder: Sendable {
+
+    public var types: [TypeDeclaration] = []
+
+    public var relationships: [Relationship] = []
+
+    public var freestandingFunctions: [Member] = []
+
+    /// Top-level (module-scope) `let`/`var`/`val` declarations.
+    public var globalVariables: [Member] = []
+
+    /// Collected in one pre-pass before bodies are extracted so call-site resolution sees the
+    /// complete set, including forward-declared siblings.
+    public var declaredTypeNames: Set<String> = []
+
+    public private(set) var currentNamespace: String?
+
+    public init() {}
+
+    // MARK: - Naming
+
+    public func qualifiedName(_ name: String) -> String {
+        currentNamespace.map { "\($0).\(name)" } ?? name
+    }
+
+    /// Returns the namespace to restore: `let outer = builder.enter(namespace: id)` /
+    /// `defer { builder.leave(outer) }`. Save/restore rather than a closure because an extractor is
+    /// a `struct` that mutates itself while walking, so a closure that also mutated it would
+    /// overlap exclusive access.
+    public mutating func enter(namespace: String) -> String? {
+        let saved = currentNamespace
+        currentNamespace = namespace
+        return saved
+    }
+
+    public mutating func leave(_ namespace: String?) {
+        currentNamespace = namespace
+    }
+
+    /// Rewrites every type's `id`/`qualifiedName` to its structural path — a top-level type keeps
+    /// its simple name, a type nested in it becomes `Outer.Inner`, and so on down. For a parser
+    /// that walks bodies before it knows the enclosing name, this replaces `enter`/`leave`.
+    public mutating func qualifyNestedTypeIDs() {
+        qualifyIDs(&types, prefix: nil)
+    }
+
+    private func qualifyIDs(_ types: inout [TypeDeclaration], prefix: String?) {
+        for index in types.indices {
+            let qualified = prefix.map { "\($0).\(types[index].name)" } ?? types[index].name
+            types[index].id = qualified
+            types[index].qualifiedName = qualified
+            qualifyIDs(&types[index].nestedTypes, prefix: qualified)
+        }
+    }
+
+    // MARK: - Documentation
+
+    /// A point in the accumulated declarations, so a caller that has just walked one source node can
+    /// find what that walk added.
+    public struct Mark: Sendable {
+        fileprivate let types: Int
+        fileprivate let freestandingFunctions: Int
+        fileprivate let globalVariables: Int
+    }
+
+    public var mark: Mark {
+        Mark(
+            types: types.count,
+            freestandingFunctions: freestandingFunctions.count,
+            globalVariables: globalVariables.count
+        )
+    }
+
+    /// Documents every top-level declaration added since `mark` — a walk over one source node can
+    /// yield a type, a function or a variable, and the prose above it documents whichever it was.
+    ///
+    /// A declaration that already carries documentation keeps it, as the more specific answer.
+    /// `prose` is only read when the walk added something.
+    public mutating func attachDocumentation(since mark: Mark, _ prose: () -> String?) {
+        guard mark.types < types.count || mark.freestandingFunctions < freestandingFunctions.count
+            || mark.globalVariables < globalVariables.count, let prose = prose() else { return }
+        for index in mark.types..<types.count where types[index].documentation == nil {
+            types[index].documentation = prose
+        }
+        for index in mark.freestandingFunctions..<freestandingFunctions.count
+            where freestandingFunctions[index].documentation == nil {
+            freestandingFunctions[index].documentation = prose
+        }
+        for index in mark.globalVariables..<globalVariables.count
+            where globalVariables[index].documentation == nil {
+            globalVariables[index].documentation = prose
+        }
+    }
+
+    // MARK: - Relationships
+
+    /// The edges' `target` is each supertype's simple name; ``resolveRelationshipNames()`` later
+    /// maps it to a qualified id.
+    public mutating func recordSupertypeRelationships(
+        from owner: String,
+        to supertypes: [TypeReference],
+        kind: Relationship.Kind
+    ) {
+        relationships.append(contentsOf: supertypes.map { $0.relationship(kind: kind, source: owner) })
+    }
+
+    /// Supertype names are taken verbatim from source text (e.g. `Animal`) while type IDs are fully
+    /// qualified (e.g. `com.example.Animal`); this maps short names to qualified IDs, using the same
+    /// resolver and ambiguity rule as the agnostic enrichment pass.
+    public mutating func resolveRelationshipNames() {
+        let resolver = TypeIdentityResolver(types: types)
+
+        relationships = relationships.map { relationship in
+            var resolved = relationship
+            resolved.source = resolver.canonicalName(for: relationship.source)
+            resolved.target = resolver.canonicalName(for: relationship.target)
+            return resolved
+        }
+
+        resolveInheritedTypes(in: &types, using: resolver)
+    }
+
+    private func resolveInheritedTypes(in types: inout [TypeDeclaration], using resolver: TypeIdentityResolver) {
+        for index in types.indices {
+            for referenceIndex in types[index].inheritedTypes.indices {
+                let name = types[index].inheritedTypes[referenceIndex].name
+                types[index].inheritedTypes[referenceIndex].name = resolver.canonicalName(for: name)
+            }
+            resolveInheritedTypes(in: &types[index].nestedTypes, using: resolver)
+        }
+    }
+
+    // MARK: - Assembly
+
+    public func artifact(language: CodeArtifact.SourceLanguage, filePath: String) -> CodeArtifact {
+        CodeArtifact(
+            metadata: .init(sourceLanguage: language, filePaths: [filePath]),
+            types: types,
+            relationships: relationships,
+            freestandingFunctions: freestandingFunctions,
+            globalVariables: globalVariables
+        )
+    }
+}

@@ -1,0 +1,88 @@
+import SwiftUI
+
+/// A "N selected" list shared by every diagram type's Inspector tab: an icon+label(+detail) row
+/// per selected item, optionally tappable to narrow the selection to just that item, plus an
+/// optional bulk action applied to the whole selection.
+struct MultiSelectionInspector<Item: Identifiable>: View where Item.ID == String {
+    struct BulkAction {
+        let label: LocalizedStringResource
+        let systemImage: String
+        let role: ButtonRole?
+        /// Suffixes `"diagram.multiSelection.bulkAction."` — must be unique among the actions
+        /// passed to one inspector so a screen object can target this action specifically.
+        let accessibilityIDSuffix: String
+        let action: () -> Void
+    }
+
+    let items: [Item]
+    /// The section header for the given selection count, e.g. an inflected "3 Methods Selected".
+    let title: (Int) -> Text
+    let rowIcon: (Item) -> String?
+    let rowLabel: (Item) -> String
+    let rowDetail: ((Item) -> String?)?
+    /// Tapping a row narrows the selection to it; `nil` renders a non-interactive row.
+    let onSelect: ((String) -> Void)?
+    let bulkActions: [BulkAction]
+
+    var body: some View {
+        List {
+            Section {
+                ForEach(items) { item in
+                    row(for: item)
+                }
+            } header: {
+                title(items.count)
+            }
+            if !bulkActions.isEmpty {
+                Section {
+                    ForEach(bulkActions, id: \.accessibilityIDSuffix) { bulkAction in
+                        Button(role: bulkAction.role) {
+                            bulkAction.action()
+                        } label: {
+                            Label(bulkAction.label, systemImage: bulkAction.systemImage)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .accessibilityIdentifier(
+                            "diagram.multiSelection.bulkAction.\(bulkAction.accessibilityIDSuffix)")
+                    }
+                }
+            }
+        }
+        .listStyle(.inset)
+    }
+
+    @ViewBuilder
+    private func row(for item: Item) -> some View {
+        if let onSelect {
+            Button {
+                onSelect(item.id)
+            } label: {
+                rowContent(item)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("diagram.multiSelection.row.\(item.id)")
+        } else {
+            rowContent(item)
+        }
+    }
+
+    private func rowContent(_ item: Item) -> some View {
+        HStack(spacing: .spacingS) {
+            if let systemImage = rowIcon(item) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.secondary)
+            }
+            Text(verbatim: rowLabel(item))
+                .font(.system(.caption, design: .monospaced))
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer()
+            if let detail = rowDetail?(item) {
+                Text(verbatim: detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}

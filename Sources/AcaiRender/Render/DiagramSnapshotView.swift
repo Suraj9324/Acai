@@ -1,0 +1,98 @@
+import SwiftUI
+import AcaiCore
+import AcaiDiff
+
+/// A static, non-interactive rendering of a generated class diagram, used to produce image
+/// exports. Composes the same `GroupingBoxView` / `TypeNodeView` / `RelationshipEdgeView` the
+/// live canvas uses, but without gestures, selection, zoom or the infinite canvas.
+///
+/// All coordinates are expected pre-normalized to the content's own space (top-left at the
+/// origin); the view sizes itself to `contentSize` plus a uniform `padding`.
+public struct DiagramSnapshotView: View {
+    let nodes: [GeneratedDiagramNode]
+    let edges: [GeneratedDiagramEdge]
+    let positions: [String: CGPoint]
+    let sizes: [String: CGSize]
+    let groupingBoxes: [DiagramLayoutModel.GroupingBox]
+    let contentSize: CGSize
+    let padding: CGFloat
+    let palette: DiagramPalette
+    /// Optional per-edge colour override (delta mode); `nil` leaves edges themed as normal.
+    let edgeColor: (@Sendable (GeneratedDiagramEdge) -> Color?)?
+    /// Optional per-node fill override (delta mode); `nil` leaves nodes themed as normal.
+    let nodeColor: (@Sendable (GeneratedDiagramNode) -> Color?)?
+    /// Non-color complement to `nodeColor`; `nil` draws no badge.
+    let nodeBadge: (@Sendable (GeneratedDiagramNode) -> DeltaStatus?)?
+
+    public init(
+        nodes: [GeneratedDiagramNode],
+        edges: [GeneratedDiagramEdge],
+        positions: [String: CGPoint],
+        sizes: [String: CGSize],
+        groupingBoxes: [DiagramLayoutModel.GroupingBox],
+        contentSize: CGSize,
+        padding: CGFloat,
+        palette: DiagramPalette = .light,
+        edgeColor: (@Sendable (GeneratedDiagramEdge) -> Color?)? = nil,
+        nodeColor: (@Sendable (GeneratedDiagramNode) -> Color?)? = nil,
+        nodeBadge: (@Sendable (GeneratedDiagramNode) -> DeltaStatus?)? = nil
+    ) {
+        self.nodes = nodes
+        self.edges = edges
+        self.positions = positions
+        self.sizes = sizes
+        self.groupingBoxes = groupingBoxes
+        self.contentSize = contentSize
+        self.padding = padding
+        self.palette = palette
+        self.edgeColor = edgeColor
+        self.nodeColor = nodeColor
+        self.nodeBadge = nodeBadge
+    }
+
+    private func size(for id: String) -> CGSize {
+        sizes[id] ?? CGSize(width: 200, height: 100)
+    }
+
+    private func rect(for id: String) -> CGRect? {
+        guard let pos = positions[id] else { return nil }
+        let size = size(for: id)
+        return CGRect(x: pos.x - size.width / 2, y: pos.y - size.height / 2,
+                      width: size.width, height: size.height)
+    }
+
+    public var body: some View {
+        ZStack {
+            ForEach(groupingBoxes) { box in
+                GroupingBoxView(label: box.label)
+                    .frame(width: box.rect.width, height: box.rect.height)
+                    .position(x: box.rect.midX, y: box.rect.midY)
+            }
+
+            ForEach(edges.removingDuplicates(by: \.id)) { edge in
+                if let sourceRect = rect(for: edge.sourceID),
+                   let targetRect = rect(for: edge.targetID) {
+                    RelationshipEdgeView(
+                        kind: edge.kind, sourceRect: sourceRect, targetRect: targetRect,
+                        sourceLabel: edge.sourceLabel, targetLabel: edge.targetLabel,
+                        strokeColor: edgeColor?(edge)
+                    )
+                }
+            }
+
+            ForEach(nodes.removingDuplicates(by: \.id)) { node in
+                if let pos = positions[node.id] {
+                    let size = size(for: node.id)
+                    TypeNodeView(
+                        node: node, isSelected: false, borderOverride: nodeColor?(node), badge: nodeBadge?(node))
+                        .frame(width: size.width, height: size.height)
+                        .position(pos)
+                }
+            }
+        }
+        .frame(width: contentSize.width, height: contentSize.height)
+        .padding(padding)
+        .background(palette.canvasInk.background)
+        .environment(\.diagramPalette, palette)
+    }
+}

@@ -1,0 +1,34 @@
+import XCTest
+
+/// Verifies GitHub sign-in/out through `GitHubAccountSection`'s personal-access-token path using
+/// `FixtureGitHubAccountService`'s canned identity.
+///
+/// A fixture launch redirects `GitHubTokenStore` to a JSON file under the run's own disposable
+/// directory (see its `fixtureFileURL`), so nothing here can reach the real keychain.
+@MainActor
+final class GitHubSignInTests: UIJourneyTestCase {
+    /// Must match `FixtureGitHubAccountService.login` (`Sources/AcaiApp/GitHub/GitHubAccountService.swift`)
+    /// — this out-of-process UI test target has no access to `AcaiApp`'s internal symbols.
+    private let fixtureLogin = "octocat"
+
+    func testSigningInWithATokenShowsTheAccountRowAndSigningOutAsksFirst() throws {
+        let browser = launchSeeded(analysis: .parsed)
+        browser.openSettings()
+
+        let github = GitHubAccountScreen(app: app)
+        github.patField.typeWhenFocused("fixture-token", into: "the personal access token field")
+        github.submitToken()
+
+        github.signedInRow.waitOrFail("the signed-in account row")
+        XCTAssertTrue(app.staticTexts[fixtureLogin].firstMatch.exists)
+        #if os(iOS)
+        github.tapAccountRowBesideSignOut()
+        #endif
+
+        // Cancelling must keep the account; only the dialog's own Sign Out removes it.
+        github.openSignOutConfirmation()
+        github.cancelSignOut()
+        github.openSignOutConfirmation()
+        github.confirmSignOut()
+    }
+}

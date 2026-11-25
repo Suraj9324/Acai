@@ -1,0 +1,294 @@
+import XCTest
+
+extension TimeInterval {
+    /// An element that follows directly from the previous interaction: navigation, a sheet, a menu.
+    /// The transition itself lands within a few seconds or never, but on a loaded CI simulator a single
+    /// accessibility query was measured at ~9s, so the budget has to cover query latency, not just the
+    /// transition. A wait returns as soon as its condition holds, so this only lengthens real failures.
+    static let uiTransition: TimeInterval = 30
+    /// Real work behind the interaction: indexing, cloning, loading a comparison. Sized for CI's
+    /// slowest case, a real-git comparison extraction on the iPad runner.
+    static let uiWork: TimeInterval = 90
+}
+
+/// The only ways a journey waits for or touches an element. Every helper fails at the caller's line
+/// with a description of what was expected, and — since `UIJourneyTestCase` stops at the first
+/// failure — never lets a missed step cascade into unrelated errors further down.
+@MainActor
+extension XCUIElement {
+    @discardableResult
+    func waitOrFail(
+        _ description: String, timeout: TimeInterval = .uiTransition,
+        file: StaticString = #filePath, line: UInt = #line
+    ) -> XCUIElement {
+        if !waitForExistence(timeout: timeout) {
+            XCTFail("\(description) never appeared", file: file, line: line)
+        }
+        return self
+    }
+
+    /// A non-failing wait, only for a retry loop that recovers from a miss itself (e.g. retyping a
+    /// query) and reports the final miss through `waitOrFail`.
+    func appears(within timeout: TimeInterval) -> Bool {
+        waitForExistence(timeout: timeout)
+    }
+
+    func waitForDisappearanceOrFail(
+        _ description: String, timeout: TimeInterval = .uiTransition,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        if !waitForNonExistence(timeout: timeout) {
+            XCTFail("\(description) never went away", file: file, line: line)
+        }
+    }
+
+    /// Waits until the element can take a tap: it exists and is hittable — an element can exist with a
+    /// stale zero-size frame before layout lands, or sit under a menu or popover. An element scrolled
+    /// out of view never reports hittable (`tap()` scrolls to it), so one lying outside the window is
+    /// ready too.
+    ///
+    /// Every query snapshots the app's accessibility tree, which on a CI simulator takes long enough
+    /// that tight polling slows the app under test and times queries out (measured: the suite ran ~40%
+    /// slower polling several queries every 0.1s). So: one existence wait, then one hit-test per
+    /// quarter second.
+    func waitUntilReady(
+        _ description: String, timeout: TimeInterval = .uiTransition,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        guard waitForExistence(timeout: timeout) else {
+            XCTFail("\(description) never appeared", file: file, line: line)
+            return
+        }
+        var window: CGRect?
+        // Checked at least once even if a slow existence query used up the deadline.
+        repeat {
+            if isHittable { return }
+            let windowFrame = window ?? XCUIApplication().windows.firstMatch.frame
+            window = windowFrame
+            if exists, !frame.isEmpty, !windowFrame.contains(frame) { return }
+            // `XCUIElement` isn't KVO-compliant, so a predicate expectation would latch its first read.
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < deadline
+        XCTFail("\(description) never became tappable", file: file, line: line)
+    }
+
+    /// A container whose content just changed size (a flexible-height list renegotiating against
+    /// sibling content that just appeared, a sheet resizing to fit it) can still move for a render
+    /// pass or two after that content first exists in the accessibility tree — see #396, where a
+    /// screenshot taken the instant a late-arriving element existed, but before the panel holding it
+    /// had finished resizing, drifted by a sub-pixel amount from run to run. Polls `frame` (exact
+    /// accessibility-tree geometry, not rendered pixels) rather than `screenshotAfterAnimationsIdle`'s
+    /// pixel diffing, so a change too small to flip a sampled pixel still extends the wait.
+    func waitUntilFrameStable(
+        _ description: String, pollInterval: TimeInterval = 0.2, stableSamplesRequired: Int = 3,
+        timeout: TimeInterval = .uiTransition, file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        var previous = frame
+        var stableCount = 0
+        repeat {
+            Thread.sleep(forTimeInterval: pollInterval)
+            let current = frame
+            if current == previous {
+                stableCount += 1
+                if stableCount >= stableSamplesRequired { return }
+            } else {
+                stableCount = 0
+            }
+            previous = current
+        } while Date() < deadline
+        XCTFail("\(description) never stopped resizing", file: file, line: line)
+    }
+
+    /// A control enabled by input it depends on (a typed token, a picked option) updates a render pass
+    /// after that input, so an instant `isEnabled` read can still see it disabled.
+    func waitUntilEnabled(
+        _ description: String, timeout: TimeInterval = .uiTransition,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        waitOrFail(description, timeout: timeout, file: file, line: line)
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if isEnabled { return }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < deadline
+        XCTFail("\(description) never became enabled", file: file, line: line)
+    }
+
+    /// A `Toggle` reports its new value a render pass after the tap.
+    func waitUntilOn(
+        _ description: String, timeout: TimeInterval = .uiTransition,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            if isOn { return }
+            Thread.sleep(forTimeInterval: 0.25)
+        } while Date() < deadline
+        if isOn { return }
+        XCTFail("\(description) never turned on", file: file, line: line)
+    }
+
+    /// `1`/`0` on macOS, `"1"`/`"0"` on iOS.
+    private var isOn: Bool {
+        if let flag = value as? Bool { return flag }
+        if let text = value as? String { return text == "1" }
+        return false
+    }
+
+    /// Taps exactly once. Use this for anything with a side effect (creating, deleting, toggling).
+    func tapWhenReady(
+        _ description: String, timeout: TimeInterval = .uiTransition,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        waitUntilReady(description, timeout: timeout, file: file, line: line)
+        SystemBanners().dismiss(file: file, line: line)
+        tap()
+    }
+
+    /// Typing before the field holds keyboard focus fails, and a loaded simulator can take a tap without
+    /// focusing; focusing is idempotent, so the tap repeats until focus lands.
+    func typeWhenFocused(
+        _ text: String, into description: String, attempts: Int = 3,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        focus(description, attempts: attempts, file: file, line: line)
+        typeText(text)
+    }
+
+    func focus(
+        _ description: String, attempts: Int = 3,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let focused = NSPredicate(format: "hasKeyboardFocus == true")
+        for _ in 0..<attempts {
+            waitUntilReady(description, file: file, line: line)
+            SystemBanners().dismiss(file: file, line: line)
+            tap()
+            let expectation = XCTNSPredicateExpectation(predicate: focused, object: self)
+            if XCTWaiter().wait(for: [expectation], timeout: .uiTransition / Double(attempts)) == .completed {
+                return
+            }
+        }
+        XCTFail("\(description) never took keyboard focus", file: file, line: line)
+    }
+
+    /// Taps, and taps again only while `destination` hasn't appeared. Only for idempotent navigation
+    /// (selecting a row, opening a sheet) or a toggle whose `destination` is its open state — a retried
+    /// create action makes a duplicate. A loaded simulator can drop a tap aimed squarely at its target.
+    ///
+    /// Each wait keeps its own budget rather than sharing one deadline: a single slow query on a loaded
+    /// CI simulator would otherwise consume the whole budget and fail a tap that was never attempted.
+    func tap(
+        _ description: String, until destination: XCUIElement, attempts: Int = 3,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        for attempt in 0..<attempts {
+            waitUntilReady(description, file: file, line: line)
+            SystemBanners().dismiss(file: file, line: line)
+            // Re-checked after the waits above, so a late arrival is never tapped closed again.
+            if attempt > 0, destination.exists { return }
+            tap()
+            if destination.waitForExistence(timeout: .uiTransition / Double(attempts)) { return }
+            if !exists { break }
+        }
+        destination.waitOrFail("the destination of tapping \(description)", file: file, line: line)
+    }
+
+    /// Taps, and again only while `self` is still there — for a control whose only effect is to
+    /// dismiss its own presentation (an alert's OK), so a repeat can never act twice.
+    func tapUntilGone(
+        _ description: String, attempts: Int = 3,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        waitUntilReady(description, file: file, line: line)
+        for _ in 0..<attempts {
+            SystemBanners().dismiss(file: file, line: line)
+            guard exists else { return }
+            tap()
+            if waitForNonExistence(timeout: .uiTransition / Double(attempts)) { return }
+        }
+        waitForDisappearanceOrFail(description, file: file, line: line)
+    }
+
+    /// `tap(_:until:)` for a gesture that only reveals (opening a context menu), never one that acts.
+    /// A long press a loaded simulator delivers as a tap opens the row instead; `back` returns to it.
+    func reveal(
+        _ description: String, until destination: XCUIElement, attempts: Int = 3,
+        recoveringThrough back: XCUIElement? = nil,
+        file: StaticString = #filePath, line: UInt = #line, _ gesture: @MainActor (XCUIElement) -> Void
+    ) {
+        for _ in 0..<attempts {
+            waitUntilReady(description, file: file, line: line)
+            SystemBanners().dismiss(file: file, line: line)
+            gesture(self)
+            if destination.waitForExistence(timeout: .uiTransition / Double(attempts)) { return }
+            if exists && isHittable { continue }
+            guard let back, back.exists else { break }
+            back.tap("the way back to \(description)", until: self, file: file, line: line)
+        }
+        destination.waitOrFail("the destination of revealing \(description)", file: file, line: line)
+    }
+
+    /// Waits for `self` to go away, failing immediately with `failure`'s label if that appears first —
+    /// for an operation whose success dismisses its own screen and whose failure shows an alert.
+    func waitForDisappearanceOrFail(
+        _ description: String, failingOn failure: XCUIElement, timeout: TimeInterval = .uiWork,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while deadline.timeIntervalSinceNow > 0 {
+            if waitForNonExistence(timeout: min(1, deadline.timeIntervalSinceNow)) { return }
+            if failure.exists {
+                XCTFail("\(description) failed: \(failure.label)", file: file, line: line)
+                return
+            }
+        }
+        XCTFail("\(description) never went away", file: file, line: line)
+    }
+}
+
+@MainActor
+extension XCUIApplication {
+    /// Cancels a popover-style presentation (e.g. a `.confirmationDialog` on iPad), which has no
+    /// Cancel button. The dismiss region spans the whole window, popover included, so its center can
+    /// land on the popover itself and do nothing; this taps the region's corner farthest from
+    /// `content`, inset away from the screen edges.
+    /// Tapping the region is idempotent, so a tap the presentation swallowed while it was still
+    /// settling is retried rather than failing the journey.
+    func dismissPopover(
+        showing content: XCUIElement, attempts: Int = 3,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        let region = otherElements["PopoverDismissRegion"]
+        content.waitUntilReady("the popover's content", file: file, line: line)
+        region.waitUntilReady("the popover's dismiss region", file: file, line: line)
+        let bounds = region.frame
+        let offset = CGVector(
+            dx: content.frame.midX > bounds.midX ? 0.15 : 0.85,
+            dy: content.frame.midY > bounds.midY ? 0.2 : 0.8
+        )
+        for _ in 0..<attempts {
+            SystemBanners().dismiss(file: file, line: line)
+            region.coordinate(withNormalizedOffset: offset).tap()
+            if region.waitForNonExistence(timeout: .uiTransition / Double(attempts)) { return }
+        }
+        region.waitForDisappearanceOrFail("the popover", file: file, line: line)
+    }
+
+    /// `tap(_:until:)` for a keyboard shortcut, so only for one that navigates. iPadOS registers the
+    /// menu's key commands shortly after the first frame, so a press right after launch can go nowhere.
+    func typeShortcut(
+        _ description: String, key: String, modifierFlags: XCUIElement.KeyModifierFlags,
+        until destination: XCUIElement, attempts: Int = 3,
+        file: StaticString = #filePath, line: UInt = #line
+    ) {
+        for _ in 0..<attempts {
+            SystemBanners().dismiss(file: file, line: line)
+            typeKey(key, modifierFlags: modifierFlags)
+            if destination.appears(within: .uiTransition / Double(attempts)) { return }
+        }
+        destination.waitOrFail("the destination of \(description)", file: file, line: line)
+    }
+}

@@ -1,0 +1,26 @@
+classDiagram
+    class root_Account["Account"] {
+        <<struct>>
+        +balance int
+    }
+    class root_LegacyAudit["LegacyAudit"] {
+        <<struct>>
+        +code int
+    }
+    class root_OrderService["OrderService"] {
+        <<struct>>
+        +gateway PaymentGateway
+    }
+    class root_PaymentGateway["PaymentGateway"] {
+        <<struct>>
+        +id int
+    }
+    class root_Receipt["Receipt"] {
+        <<struct>>
+        +total int
+    }
+    style root_LegacyAudit stroke:#c62828,stroke-width:3px
+    style root_OrderService stroke:#f9a825,stroke-width:3px
+    style root_Receipt stroke:#2e7d32,stroke-width:3px
+    root_OrderService *-- "1" root_Account : account
+    root_OrderService *-- "1" root_PaymentGateway : gateway

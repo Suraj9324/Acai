@@ -1,0 +1,267 @@
+import Testing
+@testable import AcaiPython
+@testable import AcaiCore
+
+@Suite("Python: Call Site Tests")
+struct PythonCallSiteTests {
+    let parser = PythonCodeParser()
+
+    private func callSites(_ source: String, method: String) -> [CallSite] {
+        parser.parse(source: source, fileName: "test.py")
+            .types.flatMap(\.members).first { $0.name == method }?.callSites ?? []
+    }
+
+    @Test func selfMethodCall() {
+        let source = """
+        class Service:
+            def run(self):
+                self.helper()
+
+            def helper(self):
+                pass
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.contains { $0.methodName == "helper" && $0.receiverType == nil })
+    }
+
+    @Test func callOnTypedProperty() {
+        let source = """
+        class Engine:
+            def start(self):
+                pass
+
+        class Car:
+            def __init__(self):
+                self.engine: Engine = Engine()
+
+            def drive(self):
+                self.engine.start()
+        """
+        let sites = callSites(source, method: "drive")
+        #expect(sites.contains { $0.methodName == "start" && $0.receiverType == "Engine" })
+    }
+
+    @Test func staticCallOnKnownType() {
+        let source = """
+        class Config:
+            def load(self):
+                pass
+
+        class App:
+            def boot(self):
+                Config.load()
+        """
+        let sites = callSites(source, method: "boot")
+        #expect(sites.contains { $0.methodName == "load" && $0.receiverType == "Config" })
+    }
+
+    @Test func callOnTypedParameter() {
+        let source = """
+        class Engine:
+            def start(self):
+                pass
+
+        class Car:
+            def drive(self, engine: Engine):
+                engine.start()
+        """
+        let sites = callSites(source, method: "drive")
+        #expect(sites.contains { $0.methodName == "start" && $0.receiverType == "Engine" })
+    }
+
+    /// Resolves from `compute`'s `-> Type` annotation even when `compute` is declared after the caller.
+    @Test func resolvesLocalFromSameTypeMethodCallReturnType() {
+        let source = """
+        class Widget:
+            def use(self):
+                pass
+
+        class Worker:
+            def run(self):
+                x = self.compute()
+                x.use()
+
+            def compute(self) -> Widget:
+                return Widget()
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.contains { $0.methodName == "use" && $0.receiverType == "Widget" })
+    }
+
+    /// A call made only from a class-body field initializer is recorded so its target isn't false-flagged as dead.
+    @Test func capturesClassBodyFieldInitializerCall() {
+        let source = """
+        def make_handler():
+            pass
+
+        class Worker:
+            handler = make_handler()
+        """
+        let sites = callSites(source, method: "handler")
+        #expect(sites.contains { $0.methodName == "make_handler" && $0.receiver == .free })
+    }
+
+    @Test func resolvesLocalFromConstructionAndAnnotation() {
+        let source = """
+        class Engine:
+            def start(self):
+                pass
+
+        class Car:
+            def drive(self):
+                a = Engine()
+                a.start()
+                b: Engine = make()
+                b.start()
+        """
+        let sites = callSites(source, method: "drive")
+        #expect(sites.filter { $0.methodName == "start" && $0.receiverType == "Engine" }.count == 2)
+    }
+
+    /// The idiomatic `if __name__ == "__main__": main()` entry point makes a call whose target has
+    /// nowhere to attach as a caller — collected separately and given a synthetic reachable member so
+    /// `main` isn't a dead-code false positive.
+    @Test func capturesTopLevelMainGuardCall() {
+        let source = """
+        def main():
+            pass
+
+        if __name__ == "__main__":
+            main()
+        """
+        let artifact = parser.parse(source: source, fileName: "script.py")
+        let topLevel = artifact.freestandingFunctions.first { $0.name == "<top-level>" }
+        #expect(topLevel?.accessLevel == .public)
+        #expect(topLevel?.callSites.contains { $0.methodName == "main" } == true)
+    }
+
+    @Test func callOnUnknownReceiverIsDropped() {
+        let source = """
+        class App:
+            def boot(self):
+                unknown_local.do_something()
+        """
+        let sites = callSites(source, method: "boot")
+        #expect(sites.isEmpty)
+    }
+
+    /// `head.hop.method()` — the head resolves (a typed parameter) but the hop is a property of
+    /// *that* type, unknowable in this file, so it defers to `.propertyChain` for the post-merge
+    /// pass instead of being dropped.
+    @Test func chainedCallOnKnownHeadDefersToPropertyChain() {
+        let source = """
+        class Sink:
+            def write(self, message):
+                pass
+
+        class Logger:
+            def __init__(self):
+                self.sink = Sink()
+
+        class Service:
+            def run(self, logger: Logger):
+                logger.sink.write("x")
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.contains {
+            $0.methodName == "write" && $0.receiver == .propertyChain(headTypeName: "Logger", hops: ["sink"])
+        })
+    }
+
+    /// `self.prop.method()` keeps resolving straight to the property's type — a chain off `self` is
+    /// not deferred, since the enclosing type's own properties are in scope.
+    @Test func chainOffSelfResolvesToThePropertyType() {
+        let source = """
+        class Logger:
+            def log(self, message):
+                pass
+
+        class Service:
+            def __init__(self):
+                self.logger = Logger()
+
+            def run(self):
+                self.logger.log("x")
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.contains { $0.methodName == "log" && $0.receiverType == "Logger" })
+    }
+
+    /// A construction of a class declared in the file targets its `__init__`, so an initializer can
+    /// be reached by a call edge like any other member.
+    @Test func constructionTargetsTheInitializer() {
+        let source = """
+        class Widget:
+            def __init__(self):
+                pass
+
+        class Worker:
+            def run(self):
+                made = Widget()
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.map(\.receiver) == [.type("Widget")])
+        #expect(sites.map(\.methodName) == ["__init__"])
+    }
+
+    /// A bare call to anything that is not a declared type is unchanged: Python has no implicit
+    /// receiver, so it stays `.free` for the diagram layers to match against a top-level function
+    /// rather than being tagged `.selfDispatch`.
+    @Test func bareCallToANonTypeStaysFree() {
+        let source = """
+        def helper():
+            pass
+
+        class Worker:
+            def run(self):
+                helper()
+                len([])
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.map(\.receiver) == [.free, .free])
+        #expect(sites.map(\.methodName) == ["helper", "len"])
+    }
+
+    /// A module-level construction resolves too — `moduleScope()` carries the same declared type
+    /// names, so the synthetic `<top-level>` member records the edge.
+    @Test func moduleLevelConstructionTargetsTheInitializer() {
+        let source = """
+        class Widget:
+            def __init__(self):
+                pass
+
+        widget = Widget()
+        """
+        let artifact = parser.parse(source: source, fileName: "test.py")
+        let topLevel = artifact.freestandingFunctions.first { $0.name == "<top-level>" }
+        #expect(topLevel?.callSites.map(\.receiver) == [.type("Widget")])
+        #expect(topLevel?.callSites.map(\.methodName) == ["__init__"])
+    }
+
+    /// An inherited `__init__` is recorded against the subclass exactly as an inherited regular
+    /// method is: `CallGraphBuilder` matches a `.type` receiver against that type's own members and
+    /// walks no supertype chain, so neither draws an edge to `Base`. Pinned as a pair — should
+    /// inherited-member resolution ever arrive, the constructor should come with it rather than need
+    /// a case of its own.
+    @Test func inheritedInitializerIsRecordedLikeAnInheritedMethod() {
+        let source = """
+        class Base:
+            def __init__(self):
+                pass
+
+            def shared(self):
+                pass
+
+        class Child(Base):
+            pass
+
+        class Worker:
+            def run(self):
+                made = Child()
+                made.shared()
+        """
+        let sites = callSites(source, method: "run")
+        #expect(sites.map(\.receiver) == [.type("Child"), .type("Child")])
+        #expect(sites.map(\.methodName) == ["__init__", "shared"])
+    }
+}

@@ -1,0 +1,328 @@
+// Enrichment passes over a merged `CodeArtifact`, run after per-file parsing + merging (see
+// `AnalysisService`). Each pass is pure and order-tolerant; `enriched()` chains them in order.
+
+extension CodeArtifact {
+
+    /// `resolver` supplies each type's language classification, resolved *per type* from its `sourceLanguage`
+    /// so a polyglot artifact applies each language's own rules rather than one dominant config. Injected
+    /// rather than hard-coded to stay language-agnostic; required, with no empty default. Idempotent.
+    public func enriched(using resolver: LanguageConfigurationResolver) -> CodeArtifact {
+        enriched(using: resolver, counting: nil)
+    }
+
+    func enriched(
+        using resolver: LanguageConfigurationResolver, counting counter: TypeFlattenCounter?
+    ) -> CodeArtifact {
+        resolvingExtensions(counting: counter)
+            .resolvingDeferredFieldReads()
+            .resolvingRelationshipNames(counting: counter)
+            .reclassifyingRelationshipKinds(counting: counter)
+            .inferringStructuralEdges(using: resolver, counting: counter)
+            // Inference synthesises edges from member and supertype names, so those endpoints need
+            // the same resolution — and the same ambiguity reporting — the parsed edges got above.
+            // Resolving an already-canonical endpoint is a no-op, so this only adds the diagnostics a
+            // single pass would otherwise leave to the next one.
+            .resolvingRelationshipNames(counting: counter)
+            .deduplicatingRelationships()
+    }
+
+    /// Single-language convenience, for a parser's own config or a test fixture. Polyglot callers should
+    /// use `enriched(using:)` with a real per-type resolver instead.
+    public func enriched(configuration: LanguageConfiguration) -> CodeArtifact {
+        enriched(using: LanguageConfigurationResolver(single: configuration))
+    }
+
+    // MARK: - Relationship name → id resolution
+
+    /// Rewrites relationship `source`/`target` and `inheritedTypes` names to canonical type ids, recursing
+    /// into `nestedTypes`. Runs in the language-agnostic pipeline so every language gets consistent
+    /// qualified names, not just tree-sitter extractors that opt in.
+    public func resolvingRelationshipNames() -> CodeArtifact {
+        resolvingRelationshipNames(counting: nil)
+    }
+
+    func resolvingRelationshipNames(counting counter: TypeFlattenCounter?) -> CodeArtifact {
+        let resolver = TypeIdentityResolver(types: types)
+        // `source` is already the referencing type's own id/qualified name, so its module locates
+        // the reference for both endpoints — `target` is what that type's own file/module wrote.
+        let moduleByID = Dictionary(
+            types.flattenedTree(counting: counter).map { ($0.id, $0.idScope.module) },
+            uniquingKeysWith: { first, _ in first })
+        var copy = self
+        var diagnostics: [ParseDiagnostic] = []
+
+        copy.relationships = relationships.map { rel in
+            var resolved = rel
+            let module = moduleByID[rel.source]
+            let source = resolver.resolve(rel.source, referencingModule: module)
+            let target = resolver.resolve(rel.target, referencingModule: module)
+            resolved.source = source.canonicalName
+            resolved.target = target.canonicalName
+            // Only ambiguous names (shared by several declared types, left unresolved) are flagged;
+            // genuinely external references (`.external`) are the normal case.
+            for (endpoint, kind) in [(source, "source"), (target, "target")] {
+                if case .ambiguous(let name) = endpoint {
+                    diagnostics.append(ParseDiagnostic(
+                        location: SourceLocation(filePath: rel.origin ?? "", line: 0, column: 0),
+                        kind: .unresolvedReference,
+                        message: "Ambiguous type reference '\(name)' (\(kind) of a \(rel.kind.rawValue) "
+                            + "relationship): several declared types share this simple name, so the edge "
+                            + "was left unresolved. Qualify the name to disambiguate."))
+                }
+            }
+            return resolved
+        }
+        let (resolvedTypes, inheritedDiagnostics) = Self.resolvingInheritedTypeNames(types, using: resolver)
+        copy.types = resolvedTypes
+        diagnostics.append(contentsOf: inheritedDiagnostics)
+        // Only diagnostics this pass hasn't already recorded: enrichment is documented as idempotent
+        // and re-running it must not grow the list. Duplicates *within* one pass are kept, since two
+        // edges sharing an ambiguous name are two findings.
+        let alreadyRecorded = Set(metadata.parseDiagnostics)
+        copy.metadata.parseDiagnostics.append(
+            contentsOf: diagnostics.filter { !alreadyRecorded.contains($0) })
+        return copy
+    }
+
+    /// Rewrites each type's `inheritedTypes[].name` to its canonical id where known, recursing
+    /// into `nestedTypes`. Names with no mapping (external supertypes) are left untouched; a name
+    /// shared by several declared types is left as-is and reported, matching the relationship
+    /// endpoint diagnostic below — an ambiguous supertype is worse than an ambiguous relationship
+    /// endpoint since it silently breaks depth-of-inheritance/number-of-children for the type.
+    private static func resolvingInheritedTypeNames(
+        _ types: [TypeDeclaration], using resolver: TypeIdentityResolver
+    ) -> (types: [TypeDeclaration], diagnostics: [ParseDiagnostic]) {
+        var diagnostics: [ParseDiagnostic] = []
+        let resolvedTypes = types.map { type -> TypeDeclaration in
+            var copy = type
+            let module = type.idScope.module
+            copy.inheritedTypes = type.inheritedTypes.map { ref in
+                var resolved = ref
+                let identity = resolver.resolve(ref.name, referencingModule: module)
+                resolved.name = identity.canonicalName
+                if case .ambiguous(let name) = identity {
+                    diagnostics.append(ParseDiagnostic(
+                        location: type.location ?? SourceLocation(filePath: "", line: 0, column: 0),
+                        kind: .unresolvedReference,
+                        message: "Ambiguous type reference '\(name)' (supertype of '\(type.name)'): "
+                            + "several declared types share this simple name, so the edge was left "
+                            + "unresolved. Qualify the name to disambiguate."))
+                }
+                return resolved
+            }
+            let (nested, nestedDiagnostics) = resolvingInheritedTypeNames(type.nestedTypes, using: resolver)
+            copy.nestedTypes = nested
+            diagnostics.append(contentsOf: nestedDiagnostics)
+            return copy
+        }
+        return (resolvedTypes, diagnostics)
+    }
+
+    // MARK: - Inheritance vs conformance (in-codebase only)
+
+    /// Reclassifies an `.inheritance` edge to `.conformance` when its target resolves
+    /// to a `protocol`/`interface` declared in this codebase. External first-parents are
+    /// left as-is.
+    public func reclassifyingRelationshipKinds() -> CodeArtifact {
+        reclassifyingRelationshipKinds(counting: nil)
+    }
+
+    func reclassifyingRelationshipKinds(counting counter: TypeFlattenCounter?) -> CodeArtifact {
+        let protocolIds = Set(
+            types.flattenedTree(counting: counter)
+                .filter { $0.kind == .protocol || $0.kind == .interface }
+                .map(\.id))
+        guard !protocolIds.isEmpty else { return self }
+        var copy = self
+        copy.relationships = relationships.map { rel in
+            guard rel.kind == .inheritance, protocolIds.contains(rel.target) else { return rel }
+            var resolved = rel
+            resolved.kind = .conformance
+            return resolved
+        }
+        return copy
+    }
+
+    // MARK: - Inferred structural edges
+
+    /// Adds composition/aggregation edges from property types, dependency edges from
+    /// method/initializer signatures, and a dependency edge for `typealias` targets.
+    /// `resolver` classifies primitive/collection type names *per type* from its own language, so a
+    /// polyglot artifact doesn't misclassify one language's collections under another's rules.
+    public func inferringStructuralEdges(using resolver: LanguageConfigurationResolver) -> CodeArtifact {
+        inferringStructuralEdges(using: resolver, counting: nil)
+    }
+
+    func inferringStructuralEdges(
+        using resolver: LanguageConfigurationResolver, counting counter: TypeFlattenCounter?
+    ) -> CodeArtifact {
+        let identity = TypeIdentityResolver(types: types)
+
+        var edges: [Relationship] = []
+        for type in types.flattenedTree(counting: counter) {
+            let module = type.idScope.module
+            let inference = StructuralEdgeInference(
+                configuration: resolver.configuration(for: type),
+                resolveId: { identity.canonicalName(for: $0, referencingModule: module) })
+            edges.append(contentsOf: inference.edges(for: type))
+        }
+
+        var copy = self
+        copy.relationships = relationships + edges
+        return copy
+    }
+
+    // MARK: - Dedup + redundancy removal
+
+    /// Removes exact-duplicate edges and weaker inferred edges where a stronger explicit
+    /// relationship already covers the same pair.
+    public func deduplicatingRelationships() -> CodeArtifact {
+        var copy = self
+        copy.relationships = RelationshipDeduplicator().reduced(relationships)
+        return copy
+    }
+
+    // MARK: - Deferred call-site receiver resolution (cross-file + multi-hop)
+
+    /// Resolves deferred call-site receivers — `.unresolvedTypeName` (a capitalised receiver not found
+    /// in-file) and `.propertyChain` (a multi-hop property access whose middle hop wasn't resolvable
+    /// in-file) — against the fully-merged project type graph, promoting either to `.type` when unambiguous.
+    ///
+    /// Unlike the rest of `enriched(using:)` (run per-language-group before the final merge), this needs
+    /// every file project-wide, so `AnalysisService.analyzeProject` calls it once after all specs are
+    /// merged. Idempotent.
+    public func resolvingCallSiteReceivers() -> CodeArtifact {
+        let flat = types.flattenedTree(counting: nil)
+        let resolver = CallSiteReceiverResolver(
+            identity: TypeIdentityResolver(types: types),
+            typesByID: Dictionary(flat.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        )
+
+        func resolvingCallSites(_ sites: [CallSite], owningTypeID: String?) -> [CallSite] {
+            sites.map { site in
+                var copy = site
+                copy.receiver = resolver.resolved(site.receiver, owningTypeID: owningTypeID)
+                return copy
+            }
+        }
+        func resolvingMembers(_ members: [Member], owningTypeID: String?) -> [Member] {
+            members.map { member in
+                var copy = member
+                copy.callSites = resolvingCallSites(member.callSites, owningTypeID: owningTypeID)
+                return copy
+            }
+        }
+        func resolvingTypes(_ types: [TypeDeclaration]) -> [TypeDeclaration] {
+            types.map { type in
+                var copy = type
+                copy.members = resolvingMembers(type.members, owningTypeID: type.id)
+                copy.nestedTypes = resolvingTypes(type.nestedTypes)
+                return copy
+            }
+        }
+
+        var copy = self
+        copy.types = resolvingTypes(types)
+        // Freestanding functions have no enclosing type, so `.ownProperty` never applies here.
+        copy.freestandingFunctions = resolvingMembers(freestandingFunctions, owningTypeID: nil)
+        return copy
+    }
+
+    // MARK: - Flattening
+
+    /// A flat list of every type incl. nested ones (nested copies have `nestedTypes`
+    /// cleared). Ids are already fully qualified, so they remain unique.
+    public func flattened() -> [TypeDeclaration] {
+        types.flattenedTree(counting: nil)
+    }
+}
+
+/// Resolves a call site's deferred receiver (`.unresolvedTypeName`/`.propertyChain`) against the
+/// fully-merged project type graph. Instantiated once per `resolvingCallSiteReceivers()` call.
+private struct CallSiteReceiverResolver {
+    let identity: TypeIdentityResolver
+    let typesByID: [String: TypeDeclaration]
+
+    /// The receiver unchanged, or promoted to `.type` when it now resolves unambiguously against the
+    /// full project; never guesses across an ambiguous or absent match. `owningTypeID` is needed only
+    /// to resolve `.ownProperty` against the call site's own type (`nil` for a freestanding function).
+    func resolved(_ receiver: CallReceiver, owningTypeID: String?) -> CallReceiver {
+        switch receiver {
+        case .unresolvedTypeName(let name):
+            return resolvedUnresolvedTypeName(name, orElse: receiver)
+        case .propertyChain(let headTypeName, let hops):
+            guard let finalTypeName = walkChain(headTypeName: headTypeName, hops: hops) else { return receiver }
+            return .type(finalTypeName)
+        case .ownProperty(let propertyName, let remainingHops):
+            return resolvedOwnProperty(
+                propertyName, remainingHops: remainingHops, owningTypeID: owningTypeID, orElse: receiver)
+        case .ownPropertyElement(let propertyName):
+            return resolvedOwnPropertyElement(propertyName, owningTypeID: owningTypeID, orElse: receiver)
+        case .ownMethodReturn(let methodName, let remainingHops):
+            return resolvedOwnMethodReturn(
+                methodName, remainingHops: remainingHops, owningTypeID: owningTypeID, orElse: receiver)
+        case .selfDispatch, .type, .free, .unknown:
+            return receiver
+        }
+    }
+
+    /// `name` may be simple or a dotted qualified path (e.g. `Outer.Inner.method()`); either way `.type`
+    /// requires the simple name, so the resolved declaration's own `.name` is used instead of echoing
+    /// `name` back unchanged.
+    private func resolvedUnresolvedTypeName(_ name: String, orElse receiver: CallReceiver) -> CallReceiver {
+        guard case .resolved(let id) = identity.resolve(name), let type = typesByID[id.value] else {
+            return receiver
+        }
+        return .type(type.name)
+    }
+
+    private func resolvedOwnProperty(
+        _ propertyName: String, remainingHops: [String], owningTypeID: String?, orElse receiver: CallReceiver
+    ) -> CallReceiver {
+        guard let owningTypeID, let owningType = typesByID[owningTypeID],
+              let property = owningType.members.first(where: { $0.kind == .property && $0.name == propertyName }),
+              let propertyType = property.type?.name,
+              let finalTypeName = walkChain(headTypeName: propertyType, hops: remainingHops)
+        else { return receiver }
+        return .type(finalTypeName)
+    }
+
+    private func resolvedOwnPropertyElement(
+        _ propertyName: String, owningTypeID: String?, orElse receiver: CallReceiver
+    ) -> CallReceiver {
+        guard let owningTypeID, let owningType = typesByID[owningTypeID],
+              let property = owningType.members.first(where: { $0.kind == .property && $0.name == propertyName }),
+              let type = property.type, type.isArray, let elementName = type.genericArguments.first?.name,
+              case .resolved = identity.resolve(elementName)
+        else { return receiver }
+        return .type(elementName)
+    }
+
+    private func resolvedOwnMethodReturn(
+        _ methodName: String, remainingHops: [String], owningTypeID: String?, orElse receiver: CallReceiver
+    ) -> CallReceiver {
+        guard let owningTypeID, let owningType = typesByID[owningTypeID],
+              let method = owningType.members.first(where: { $0.kind == .method && $0.name == methodName }),
+              let returnTypeName = method.type?.name,
+              let finalTypeName = walkChain(headTypeName: returnTypeName, hops: remainingHops)
+        else { return receiver }
+        return .type(finalTypeName)
+    }
+
+    /// Walks `hops` from `headTypeName`'s declared properties, resolving each hop's property type
+    /// through the project type graph. Returns the final type name only if every hop resolves
+    /// unambiguously; otherwise returns `nil` rather than guessing.
+    private func walkChain(headTypeName: String, hops: [String]) -> String? {
+        var currentTypeName = headTypeName
+        for hop in hops {
+            guard case .resolved(let id) = identity.resolve(currentTypeName),
+                  let currentType = typesByID[id.value],
+                  let property = currentType.members.first(where: { $0.kind == .property && $0.name == hop }),
+                  let nextTypeName = property.type?.name
+            else { return nil }
+            currentTypeName = nextTypeName
+        }
+        guard case .resolved = identity.resolve(currentTypeName) else { return nil }
+        return currentTypeName
+    }
+}

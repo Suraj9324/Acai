@@ -1,0 +1,431 @@
+import SwiftUI
+import UniformTypeIdentifiers
+
+public struct ProjectBrowserView: View {
+    // Not `private`: `ProjectBrowserView+Repositories.swift`'s and `ProjectBrowserView
+    // +SidebarRows.swift`'s extensions (separate files, kept there only to stay under this file's
+    // own line-count limit) need to read these too.
+    @StateObject var model: ProjectBrowserViewModel
+    @Environment(\.horizontalSizeClass) var horizontalSizeClass
+    #if os(macOS)
+    @Environment(\.openWindow) var openWindow
+    @Environment(\.appearsActive) private var appearsActive
+    #endif
+
+    /// The value of the `WindowGroup(for:)` this window was opened with, kept pointing at what the
+    /// window shows so reopening that address focuses this window and relaunch restores it.
+    let windowAddress: Binding<AppAddress?>?
+
+    @EnvironmentObject var browserWindows: BrowserWindows
+    // See `QuickOpenPresenter` for why macOS's is per window — published below as a focused scene
+    // object, so ⇧⌘O reaches the key window's own — and iOS's comes from the scene.
+    #if os(macOS)
+    @StateObject private var quickOpenPresenter = QuickOpenPresenter()
+    @State private var comparePopover = ComparePopoverPresenter()
+    #else
+    @EnvironmentObject private var quickOpenPresenter: QuickOpenPresenter
+    #endif
+    // iPad/iPhone have no `Settings` scene to reach via ⌘, — a gear icon opens the same content
+    // as a sheet instead. Shared (not local `@State`) so `NewCodebaseSheet`'s "Sign in to GitHub
+    // in Settings" button can open it too — see `SettingsPresenter`'s own doc comment.
+    @EnvironmentObject private var settingsPresenter: SettingsPresenter
+    // Scene-level, because ⌘/ comes from `KeyboardShortcutCommands` — a menu command sits outside this
+    // view hierarchy, so it cannot reach a `@State` here. Settings has its own route to the same panel.
+    @EnvironmentObject private var keyboardShortcutsPresenter: KeyboardShortcutsPresenter
+    @State var windowToken = UUID()
+    @State var collapsedProjects = Set<UUID>()
+    @State var sidebarRename = SidebarRename()
+    @State var projectPendingDeletion: Project?
+    @State var codebasePendingDeletion: Codebase?
+    #if os(macOS)
+    @State var diagramPendingDeletion: SidebarDiagramDeletion?
+    @FocusState var sidebarIsFocused: Bool
+    #endif
+    @State private var newProjectPresented = false
+    @State private var columnVisibility: NavigationSplitViewVisibility
+
+    /// `windowAddress` is set for a window opened on one item, which starts on it with the sidebar hidden.
+    init(store: ProjectStore, windowAddress: Binding<AppAddress?>? = nil) {
+        let initialAddress = windowAddress?.wrappedValue
+        _model = StateObject(wrappedValue: {
+            let model = ProjectBrowserViewModel(store: store)
+            if let initialAddress {
+                model.selection = try? model.selection(for: initialAddress)
+            }
+            return model
+        }())
+        self.windowAddress = windowAddress
+        _columnVisibility = State(initialValue: initialAddress == nil ? .automatic : .detailOnly)
+    }
+
+    public var body: some View {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
+            sidebarContent
+                .navigationTitle(.app("View.ProjectBrowserView.Projects"))
+                .navigationSplitViewColumnWidth(min: 200, ideal: 260, max: 400)
+                #if !os(macOS)
+                .toolbar {
+                    if horizontalSizeClass == .compact {
+                        ToolbarItem(placement: .primaryAction) {
+                            Button {
+                                newProjectPresented = true
+                            } label: {
+                                Label(.app("View.ProjectBrowserView.NewProject"), systemImage: "plus")
+                            }
+                            .accessibilityIdentifier("sidebar.newProjectButton")
+                        }
+                    }
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            quickOpenPresenter.isPresented = true
+                        } label: {
+                            Label(.app("View.ProjectBrowserView.QuickOpen"), systemImage: "magnifyingglass")
+                        }
+                        .accessibilityIdentifier("sidebar.quickOpenButton")
+                    }
+                    // `.topBarTrailing`, not `.secondaryAction`: with more than one `.secondaryAction`
+                    // sibling, iOS collapses them into one overflow control with no individually
+                    // tappable element. The iPad sidebar fits three bar items before it overflows too,
+                    // which is why the diagram theme and keyboard shortcuts live in Settings.
+                    ToolbarItem(placement: .topBarTrailing) {
+                        ActivityIndicatorView(activityCenter: model.store.activityCenter)
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Button {
+                            settingsPresenter.isPresented = true
+                        } label: {
+                            Label(.app("View.ProjectBrowserView.Settings"), systemImage: "gear")
+                        }
+                        .accessibilityIdentifier("sidebar.settingsButton")
+                    }
+                }
+                #endif
+        } detail: {
+            detailContent
+                #if os(macOS)
+                .containerBackground(.windowBackground, for: .window)
+                #endif
+        }
+        #if os(macOS)
+        .toolbar {
+            ToolbarItem {
+                ActivityIndicatorView(activityCenter: model.store.activityCenter)
+            }
+        }
+        .modifier(ComparePopoverPresentation(presenter: comparePopover, model: model))
+        #endif
+        .sheet(isPresented: $newProjectPresented) {
+            NewProjectSheet { title, subtitle in
+                let id = model.editing.addProject(title: title, subtitle: subtitle)
+                model.open(.project(id))
+            }
+        }
+        .sheet(isPresented: $quickOpenPresenter.isPresented) {
+            QuickOpenSheetHost()
+                .environmentObject(model)
+        }
+        .environment(\.openInNewWindow, OpenInNewWindowAction { openInNewWindow($0) })
+        .onOpenURL { url in openLink(url) }
+        // Lists every codebase in the widget's picker before anything is reindexed.
+        .task { model.publishWidgetSnapshots() }
+        .onChange(of: model.selection, initial: true) { _, selection in updateDiagramClaim(for: selection) }
+        .onDisappear { browserWindows.windowClosed(windowToken) }
+        .focusedSceneValue(\.browserWindowActions, windowActions)
+        .focusedSceneValue(
+            \.newProjectAction,
+            NewProjectAction(isPresentingSheet: isPresentingSheet) { newProjectPresented = true })
+        #if os(macOS)
+        .focusedSceneObject(quickOpenPresenter)
+        .focusedSceneValue(\.sidebarDeleteAction, sidebarDeleteAction)
+        .background {
+            HostingWindowReader { window in
+                browserWindows.windowOpened(windowToken) { [weak window] in
+                    window?.makeKeyAndOrderFront(nil)
+                }
+            }
+        }
+        .onChange(of: appearsActive, initial: true) { _, isActive in
+            if isActive { browserWindows.windowBecameActive(windowToken) }
+        }
+        #endif
+        #if !os(macOS)
+        // ⌘/ from a hardware keyboard; touch reaches the same panel from Settings.
+        .sheet(isPresented: $keyboardShortcutsPresenter.isPresented) {
+            KeyboardShortcutsPanel()
+        }
+        .sheet(isPresented: $settingsPresenter.isPresented) {
+            SettingsSheet()
+                .environmentObject(model)
+        }
+        // One view presents one sheet at a time. A shortcut that fires over another sheet would
+        // otherwise leave its flag set with nothing shown, and every later press would be a no-op.
+        .onChange(of: keyboardShortcutsPresenter.isPresented) { _, shown in
+            if shown, presentedSheetCount > 1 { keyboardShortcutsPresenter.isPresented = false }
+        }
+        .onChange(of: quickOpenPresenter.isPresented) { _, shown in
+            if shown, presentedSheetCount > 1 { quickOpenPresenter.isPresented = false }
+        }
+        #endif
+        #if os(macOS)
+        .modifier(SidebarDiagramDeletionConfirmation(deletion: $diagramPendingDeletion, model: model))
+        #endif
+        .modifier(ExportPresentation(model: model))
+        .modifier(StoreErrorAlert(
+            store: model.store, model: model,
+            isPresenter: browserWindows.lastActiveWindow.map { $0 == windowToken } ?? true))
+        .confirmationDialog(
+            .app("View.ProjectBrowserView.ConfirmDeleteProject \(projectPendingDeletion?.title ?? "")"),
+            isPresented: Binding(
+                get: { projectPendingDeletion != nil },
+                set: { if !$0 { projectPendingDeletion = nil } }
+            ),
+            presenting: projectPendingDeletion
+        ) { project in
+            Button(.app("View.ProjectBrowserView.DeleteProject"), role: .destructive) {
+                model.editing.removeProject(project.id)
+            }
+            .accessibilityIdentifier("sidebar.project.delete.confirmButton")
+        } message: { _ in
+            Text(.app("View.ProjectBrowserView.DeletesAllCodebasesDiagrams"))
+        }
+        .confirmationDialog(
+            .app("View.ProjectBrowserView.ConfirmDeleteCodebase \(codebasePendingDeletion?.name ?? "")"),
+            isPresented: Binding(
+                get: { codebasePendingDeletion != nil },
+                set: { if !$0 { codebasePendingDeletion = nil } }
+            ),
+            presenting: codebasePendingDeletion
+        ) { codebase in
+            Button(.app("View.ProjectBrowserView.DeleteCodebase"), role: .destructive) {
+                Task { await model.editing.removeCodebase(codebase.id) }
+            }
+            .accessibilityIdentifier("sidebar.codebase.delete.confirmButton")
+        } message: { _ in
+            Text(.app("View.ProjectBrowserView.DeletesDiagramsCachedAnalysis"))
+        }
+    }
+
+    #if !os(macOS)
+    private var presentedSheetCount: Int {
+        [
+            newProjectPresented, quickOpenPresenter.isPresented,
+            settingsPresenter.isPresented, keyboardShortcutsPresenter.isPresented
+        ].filter { $0 }.count
+    }
+    #endif
+
+    private var isPresentingSheet: Bool {
+        #if os(macOS)
+        newProjectPresented || quickOpenPresenter.isPresented
+        #else
+        presentedSheetCount > 0
+        #endif
+    }
+
+    // MARK: - Sidebar (Left Column)
+
+    private var sidebarContent: some View {
+        VStack(spacing: .zero) {
+            List(selection: $model.selection) {
+                let projects = model.store.projects.sorted(byLocalizedName: \.title)
+                ForEach(projects) { project in
+                    projectRow(project: project)
+                }
+
+                repositoriesSection
+            }
+            .overlay { noProjectsState }
+            #if os(macOS)
+            .focused($sidebarIsFocused)
+            .background { deleteSelectionShortcut }
+            #endif
+
+            // On compact width (iPhone) this action lives in the toolbar instead — a footer button
+            // pinned below a short (or empty) list reads as an unexpected floating control there.
+            // iPad's wide sidebar keeps this footer, matching macOS.
+            if horizontalSizeClass != .compact {
+                Divider()
+
+                Button {
+                    newProjectPresented = true
+                } label: {
+                    Label(.app("View.ProjectBrowserView.NewProject"), systemImage: "plus")
+                        .font(.headline)
+                }
+                .buttonStyle(.plain)
+                .padding()
+                .accessibilityIdentifier("sidebar.newProjectButton")
+            }
+        }
+    }
+
+    // MARK: - Detail (Center Column)
+
+    @ViewBuilder
+    private var detailContent: some View {
+        if let diagramID = model.selection?.diagramID,
+           browserWindows.isOpenElsewhere(diagramID, from: windowToken) {
+            diagramOpenElsewhere(diagramID)
+        } else {
+            selectionDetail
+        }
+    }
+
+    @ViewBuilder
+    private var selectionDetail: some View {
+        switch model.selection {
+        case .project(let id):
+            ProjectDetailView(projectID: id)
+                .id(id)
+                .environmentObject(model)
+        case .codebase(let id):
+            CodebaseDetailView(codebaseID: id)
+                .id(id)
+                .environmentObject(model)
+        case .generatedDiagram(let diagramID):
+            generatedDiagramDetail(diagramID: diagramID)
+        case .freeformDiagram(let diagramID):
+            freeformDiagramDetail(diagramID: diagramID)
+        case .repository(let remoteURL):
+            RepositoryDetailView(remoteURL: remoteURL)
+                .id(remoteURL)
+                .environmentObject(model)
+        case .findings(let projectID):
+            FindingsView(projectID: projectID)
+                .id(projectID)
+                .environmentObject(model)
+        case .inspect(let codebaseID):
+            InspectView(codebaseID: codebaseID)
+                .id(codebaseID)
+                .environmentObject(model)
+        case .none:
+            emptyState
+                .navigationTitle("")
+        }
+    }
+
+    @ViewBuilder
+    private func generatedDiagramDetail(diagramID: UUID) -> some View {
+        if let diagram = model.generatedDiagram(for: diagramID),
+           let artifact = model.comparisonNewArtifact(for: diagram) ?? model.artifact(for: diagram.codebaseID),
+           let codebase = model.codebase(for: diagram.codebaseID) {
+            switch diagram.type {
+            case .moduleCoupling, .hotspot:
+                // Split into `ProjectBrowserView+AnalysisDiagrams.swift` (own file) purely to keep
+                // this function's body under SwiftLint's line limit.
+                analysisDiagramDetail(diagram: diagram, artifact: artifact, codebase: codebase)
+                    .id(diagramID)
+                    .environmentObject(model)
+            default:
+                // Split into `ProjectBrowserView+StructuralDiagrams.swift` for the same reason.
+                structuralDiagramDetail(diagram: diagram, artifact: artifact, codebase: codebase)
+            }
+        } else {
+            VStack(spacing: .spacingM) {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.largeTitle)
+                    .foregroundStyle(.secondary)
+                Text(.app("View.ProjectBrowserView.NoAnalysisAvailableReindex"))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Wraps a drawable diagram with the delta-comparison overlay button, loading the git-revision
+    /// snapshot on demand and rebuilding the diagram once it (or a changed ref) is available. Not
+    /// `private`: `ProjectBrowserView+StructuralDiagrams.swift`'s extension needs to call it too.
+    @ViewBuilder
+    func deltaHosted(
+        diagram: GeneratedDiagram, @ViewBuilder content: @escaping (Binding<Bool>) -> some View
+    ) -> some View {
+        // Keyed per diagram: switching between two diagrams of one type would otherwise keep the host's
+        // compare-panel and has-been-fitted state for the next diagram.
+        DeltaHostedDiagramView(diagram: diagram, content: content)
+            .id(diagram.id)
+            .environmentObject(model)
+    }
+}
+
+// MARK: - Empty Sidebar
+
+extension ProjectBrowserView {
+    @ViewBuilder
+    private var noProjectsState: some View {
+        if model.store.projects.isEmpty {
+            ActionableEmptyState(
+                text: .app("View.ProjectBrowserView.NoProjectsYet"),
+                systemImage: "folder.badge.plus",
+                identifier: "sidebar.emptyState"
+            ) {
+                Button {
+                    newProjectPresented = true
+                } label: {
+                    Label(.app("View.ProjectBrowserView.NewProject"), systemImage: "plus")
+                }
+                .accessibilityIdentifier("sidebar.emptyState.newProjectButton")
+            }
+        }
+    }
+}
+
+// MARK: - Store Error Alert
+
+/// Observes the `ProjectStore` directly (it's nested inside the view model, so the parent view
+/// doesn't re-render on its changes) and presents the latest persistence/export failure.
+private struct StoreErrorAlert: ViewModifier {
+    @ObservedObject var store: ProjectStore
+    @ObservedObject var model: ProjectBrowserViewModel
+    /// The store is shared by every window, so only the last active one presents its error.
+    let isPresenter: Bool
+
+    /// Drives the picker from view state rather than from the alert's own action: presenting a
+    /// `.fileImporter` while the alert is still dismissing silently does nothing. The target is
+    /// held separately from the presentation flag, which SwiftUI clears on dismissal — before the
+    /// completion handler that needs it runs.
+    @State private var isChoosingFolder = false
+    @State private var relocationTarget: UUID?
+
+    func body(content: Content) -> some View {
+        content
+            .alert(item: Binding(
+                get: { isPresenter ? store.lastError : nil },
+                set: { if isPresenter { store.lastError = $0 } }
+            )) { error in
+                guard let codebaseID = error.relocatableCodebaseID else {
+                    return Alert(
+                        title: Text(.app("View.StoreErrorAlert.SomethingWentWrong")),
+                        message: Text(verbatim: error.message),
+                        dismissButton: .default(Text(.app("View.StoreErrorAlert.OK")))
+                    )
+                }
+                return Alert(
+                    title: Text(.app("View.StoreErrorAlert.SomethingWentWrong")),
+                    message: Text(verbatim: error.message),
+                    primaryButton: .default(Text(.app("View.StoreErrorAlert.ChooseFolder"))) {
+                        relocationTarget = codebaseID
+                        isChoosingFolder = true
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .fileImporter(isPresented: $isChoosingFolder, allowedContentTypes: [.folder]) { result in
+                relocate(result: result)
+            }
+    }
+
+    private func relocate(result: Result<URL, Error>) {
+        guard let codebaseID = relocationTarget else { return }
+        relocationTarget = nil
+        guard let url = try? result.get() else { return }
+        do {
+            guard url.startAccessingSecurityScopedResource() else {
+                throw ScopedResourceAccess.Failure.accessDenied(url.path)
+            }
+            defer { url.stopAccessingSecurityScopedResource() }
+            let bookmark = try SecurityScopedBookmark(resolving: url)
+            model.editing.relocateCodebase(id: codebaseID, directoryURL: url, securityScopedBookmark: bookmark)
+        } catch {
+            store.report(.app("Error.ProjectBrowserView.FolderUnusable \(error.localizedDescription)"))
+        }
+    }
+}

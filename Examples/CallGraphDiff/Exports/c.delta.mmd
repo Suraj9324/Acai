@@ -1,0 +1,14 @@
+flowchart LR
+    orders_c_charge_card__["charge_card"]
+    orders_c_place_order__["place_order"]
+    orders_c_save_order__["save_order"]
+    orders_c_submit_order__["submit_order"]
+    orders_c_validate_order__["validate_order"]
+    orders_c_place_order__ --> orders_c_charge_card__
+    orders_c_place_order__ --> orders_c_save_order__
+    orders_c_submit_order__ --> orders_c_place_order__
+    orders_c_submit_order__ --> orders_c_validate_order__
+    style orders_c_charge_card__ fill:#f5f5f5,stroke-dasharray: 3 3
+    style orders_c_save_order__ fill:#f5f5f5,stroke-dasharray: 3 3,stroke:#2e7d32,stroke-width:3px
+    style orders_c_validate_order__ fill:#f5f5f5,stroke-dasharray: 3 3
+    linkStyle 1 stroke:#2e7d32,stroke-width:2px

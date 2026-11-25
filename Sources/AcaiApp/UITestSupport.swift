@@ -1,0 +1,193 @@
+import Foundation
+import SwiftUI
+
+/// Resolves a UI-test fixture's base directory from the process environment, so `ProjectStore` can
+/// be pointed at deterministic, disposable state instead of the real user's Application
+/// Support/Documents directory. Fully inert (`resolveBaseDir()` returns `nil`) unless
+/// `ACAI_UITEST_FIXTURE_BASE_DIR` is actually present — a real user's launch never carries it.
+///
+/// **Environment, not launch arguments.** A launch argument that isn't part of a `-key value` pair
+/// is read as a file to open, and an app launched to open files gets no automatic untitled window —
+/// measured directly: launching this app with one stray bare token yields zero windows, the same
+/// launch without it yields one. The repeatable multi-field values here can't be expressed as a
+/// single `-key value` pair, so nothing goes through argv at all rather than relying on every
+/// future call site getting the pairing right.
+///
+/// The values themselves are staged by the test process, not this one: `App/AcaiUITests` (a separate
+/// Xcode-project target — no shared internal API) copies its bundled `Fixtures/<name>` resource to a
+/// fresh temporary directory before launch and passes that directory's absolute path here (see
+/// `XCUIApplication.launchWithFixture(_:)` in `App/AcaiUITests/Support/Launch.swift`). **The
+/// variable names below and the ones in `Launch.swift` must match** — they can't share a constant
+/// across the SwiftPM package / Xcode-project boundary.
+struct UITestFixtureResolver: Sendable {
+    static let fixtureBaseDirVariable = "ACAI_UITEST_FIXTURE_BASE_DIR"
+
+    private let environment: [String: String]
+
+    init(environment: [String: String] = ProcessInfo.processInfo.environment) {
+        self.environment = environment
+    }
+
+    /// The master switch, and `#if DEBUG` because it is one: every other hook here is gated on this
+    /// returning non-`nil`. An environment variable is inherited by any child process, so unlike the
+    /// launch arguments this replaced it could be set on a real user's session by accident — a
+    /// release build must not be able to redirect `ProjectStore` away from its real data at all.
+    func resolveBaseDir() -> URL? {
+        #if DEBUG
+        return url(Self.fixtureBaseDirVariable)
+        #else
+        return nil
+        #endif
+    }
+
+    static let gitHubRemoteVariable = "ACAI_UITEST_GITHUB_REMOTE_URL"
+
+    /// A local git repository to clone/fetch from instead of real github.com.
+    func resolveGitHubRemoteURL() -> URL? {
+        url(Self.gitHubRemoteVariable)
+    }
+
+    static let gitHubFastFixtureRootVariable = "ACAI_UITEST_GITHUB_FAST_FIXTURE_ROOT"
+
+    /// Selects `FastFixtureGitRemoteService` over the real-git `FixtureGitRemoteService`.
+    func resolveGitHubFastFixtureRoot() -> URL? {
+        url(Self.gitHubFastFixtureRootVariable)
+    }
+
+    static let gitHubRepositorySizeVariable = "ACAI_UITEST_GITHUB_REPOSITORY_SIZE_KB"
+
+    /// The size the fixture GitHub repository reports, to exercise the large-clone warning.
+    func resolveGitHubRepositorySizeKilobytes() -> Int? {
+        environment[Self.gitHubRepositorySizeVariable].flatMap { Int($0) }
+    }
+
+    static let localFolderVariable = "ACAI_UITEST_LOCAL_FOLDER"
+
+    /// Picked directly by "Choose…", since XCUITest cannot drive the system file importer.
+    func resolveLocalFolderURL() -> URL? {
+        url(Self.localFolderVariable)
+    }
+
+    static let codebaseArtifactsVariable = "ACAI_UITEST_CODEBASE_ARTIFACTS"
+
+    /// Newline-separated `<codebaseID>\t<path>` records — see `CodebaseAnalyzingResolver`. A
+    /// codebase with no entry still gets the real analyzer. Tab and newline are the separators
+    /// because a path may legally contain anything else.
+    func resolveCodebaseArtifactURLs() -> [UUID: URL] {
+        var result: [UUID: URL] = [:]
+        for fields in records(Self.codebaseArtifactsVariable, fieldCount: 2) {
+            guard let codebaseID = UUID(uuidString: fields[0]) else { continue }
+            result[codebaseID] = URL(fileURLWithPath: fields[1])
+        }
+        return result
+    }
+
+    static let defaultCodebaseArtifactVariable = "ACAI_UITEST_DEFAULT_CODEBASE_ARTIFACT"
+
+    /// The canned artifact for any codebase without its own entry — a codebase the journey creates
+    /// itself (a clone) gets an id no launch could have staged.
+    func resolveDefaultCodebaseArtifactURL() -> URL? {
+        guard let path = environment[Self.defaultCodebaseArtifactVariable], !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    static let preindexedArtifactVariable = "ACAI_UITEST_PREINDEXED_ARTIFACT"
+
+    /// An artifact every seeded codebase is already indexed with at launch, so a journey that needs an
+    /// indexed codebase doesn't have to tap Reindex and wait to reach the state it is actually about.
+    func resolvePreindexedArtifactURL() -> URL? {
+        guard let path = environment[Self.preindexedArtifactVariable], !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path)
+    }
+
+    static let comparisonArtifactsVariable = "ACAI_UITEST_COMPARISON_ARTIFACTS"
+
+    struct ComparisonArtifactKey: Hashable {
+        let codebaseID: UUID
+        let ref: String
+    }
+
+    /// Newline-separated `<codebaseID>\t<ref>\t<path>` records — see `ComparisonArtifactResolver`.
+    /// A `(codebaseID, ref)` pair with no entry still gets a real `GitRevisionSnapshot`.
+    func resolveComparisonArtifactURLs() -> [ComparisonArtifactKey: URL] {
+        var result: [ComparisonArtifactKey: URL] = [:]
+        for fields in records(Self.comparisonArtifactsVariable, fieldCount: 3) {
+            guard let codebaseID = UUID(uuidString: fields[0]) else { continue }
+            result[.init(codebaseID: codebaseID, ref: fields[1])] = URL(fileURLWithPath: fields[2])
+        }
+        return result
+    }
+
+    static let colorSchemeVariable = "ACAI_UITEST_COLOR_SCHEME"
+
+    /// A forced `light`/`dark` appearance, so snapshot-test screenshots are deterministic regardless
+    /// of the runner's or developer's own system appearance default (an unpinned mismatch flips
+    /// nearly every pixel, not just the few percent of AA/font-hinting noise this suite tolerates).
+    func resolveColorScheme() -> ColorScheme? {
+        switch environment[Self.colorSchemeVariable] {
+        case "dark":
+            return .dark
+        case "light":
+            return .light
+        default:
+            return nil
+        }
+    }
+
+    static let dynamicTypeSizeVariable = "ACAI_UITEST_DYNAMIC_TYPE_SIZE"
+
+    private static let dynamicTypeSizesByName: [String: DynamicTypeSize] = [
+        "xSmall": .xSmall,
+        "small": .small,
+        "medium": .medium,
+        "large": .large,
+        "xLarge": .xLarge,
+        "xxLarge": .xxLarge,
+        "xxxLarge": .xxxLarge,
+        "accessibility1": .accessibility1,
+        "accessibility2": .accessibility2,
+        "accessibility3": .accessibility3,
+        "accessibility4": .accessibility4,
+        "accessibility5": .accessibility5
+    ]
+
+    /// Forces a specific Dynamic Type size, so a journey can prove layouts hold at the largest
+    /// accessibility sizes deterministically, rather than depending on the runner's own text-size
+    /// setting.
+    func resolveDynamicTypeSize() -> DynamicTypeSize? {
+        environment[Self.dynamicTypeSizeVariable].flatMap { Self.dynamicTypeSizesByName[$0] }
+    }
+
+    private func url(_ variable: String) -> URL? {
+        guard let path = environment[variable], !path.isEmpty else { return nil }
+        return URL(fileURLWithPath: path, isDirectory: true)
+    }
+
+    /// Records with the wrong field count are dropped rather than partially applied — a malformed
+    /// entry should leave the real implementation in place, not a half-built fixture.
+    private func records(_ variable: String, fieldCount: Int) -> [[String]] {
+        guard let value = environment[variable], !value.isEmpty else { return [] }
+        return value.split(separator: "\n")
+            .map { record in
+                record
+                    .split(separator: "\t", maxSplits: fieldCount - 1, omittingEmptySubsequences: false)
+                    .map(String.init)
+            }
+            .filter { $0.count == fieldCount }
+    }
+}
+
+extension View {
+    /// Unlike `preferredColorScheme(_:)`, SwiftUI's `dynamicTypeSize(_:)` has no optional-accepting
+    /// overload — `nil` leaves the system's own size in effect, as `resolveDynamicTypeSize()` returns
+    /// outside a UI test. A distinct name, not an overload of `dynamicTypeSize`, so the `if let`
+    /// branch below unambiguously calls SwiftUI's own non-optional modifier rather than itself.
+    @ViewBuilder
+    func forcingDynamicTypeSize(_ size: DynamicTypeSize?) -> some View {
+        if let size {
+            dynamicTypeSize(size)
+        } else {
+            self
+        }
+    }
+}

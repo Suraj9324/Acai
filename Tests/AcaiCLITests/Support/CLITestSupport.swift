@@ -1,0 +1,168 @@
+import ArgumentParser
+import Foundation
+import Testing
+@testable import AcaiCLI
+
+/// Shared helpers for driving the CLI command tree in-process.
+///
+/// Commands are exercised through `AcaiCommand.parseAsRoot`, which runs ArgumentParser's parsing
+/// *and* each command's `validate()`, so validation failures surface as thrown errors here exactly
+/// as they would on the real command line. `run()` paths are reached by casting the parsed root to
+/// the concrete subcommand. Filesystem fixtures live under a unique temp directory and are cleaned
+/// up by the caller; tests never touch the user's `~/.config/acai`.
+enum CLITestSupport {
+
+    // MARK: - Parsing
+
+    static func parseDiagram(_ arguments: [String]) throws -> AcaiCommand.Diagram {
+        let root = try AcaiCommand.parseAsRoot(["diagram"] + arguments)
+        return try #require(root as? AcaiCommand.Diagram)
+    }
+
+    static func parseAnalyze(_ arguments: [String]) throws -> AcaiCommand.Analyze {
+        let root = try AcaiCommand.parseAsRoot(["analyze"] + arguments)
+        return try #require(root as? AcaiCommand.Analyze)
+    }
+
+    static func parseMetrics(_ arguments: [String]) throws -> AcaiCommand.Metrics {
+        let root = try AcaiCommand.parseAsRoot(["metrics"] + arguments)
+        return try #require(root as? AcaiCommand.Metrics)
+    }
+
+    #if os(macOS)
+    /// macOS-only: the `image` subcommand needs SwiftUI's `ImageRenderer`, so it is not compiled on Linux.
+    static func parseImage(_ arguments: [String]) throws -> AcaiCommand.Image {
+        let root = try AcaiCommand.parseAsRoot(["image"] + arguments)
+        return try #require(root as? AcaiCommand.Image)
+    }
+
+    /// macOS-only for the same reason as `image`: the Atlas embeds rendered diagrams.
+    static func parseAtlas(_ arguments: [String]) throws -> AcaiCommand.Atlas {
+        let root = try AcaiCommand.parseAsRoot(["atlas"] + arguments)
+        return try #require(root as? AcaiCommand.Atlas)
+    }
+
+    /// macOS-only: the `hotspots` subcommand needs `AcaiGit`'s libgit2 history walk.
+    static func parseHotspots(_ arguments: [String]) throws -> AcaiCommand.Hotspots {
+        let root = try AcaiCommand.parseAsRoot(["hotspots"] + arguments)
+        return try #require(root as? AcaiCommand.Hotspots)
+    }
+    #endif
+
+    static func parseRules(_ arguments: [String]) throws -> AcaiCommand.Rules {
+        let root = try AcaiCommand.parseAsRoot(["rules"] + arguments)
+        return try #require(root as? AcaiCommand.Rules)
+    }
+
+    static func parseInspect(_ arguments: [String]) throws -> AcaiCommand.Inspect {
+        let root = try AcaiCommand.parseAsRoot(["inspect"] + arguments)
+        return try #require(root as? AcaiCommand.Inspect)
+    }
+
+    static func parseQuality(_ arguments: [String]) throws -> AcaiCommand.Quality {
+        let root = try AcaiCommand.parseAsRoot(["quality"] + arguments)
+        return try #require(root as? AcaiCommand.Quality)
+    }
+
+    static func parseCallGraph(_ arguments: [String]) throws -> AcaiCommand.CallGraph {
+        let root = try AcaiCommand.parseAsRoot(["callgraph"] + arguments)
+        return try #require(root as? AcaiCommand.CallGraph)
+    }
+
+    static func parseDependents(_ arguments: [String]) throws -> AcaiCommand.Dependents {
+        let root = try AcaiCommand.parseAsRoot(["dependents"] + arguments)
+        return try #require(root as? AcaiCommand.Dependents)
+    }
+
+    static func parseImpactAlias(_ arguments: [String]) throws -> AcaiCommand.Impact {
+        let root = try AcaiCommand.parseAsRoot(["impact"] + arguments)
+        return try #require(root as? AcaiCommand.Impact)
+    }
+
+    static func message(for error: Error) -> String {
+        AcaiCommand.message(for: error)
+    }
+
+    static func exitCode(for error: Error) -> ExitCode {
+        AcaiCommand.exitCode(for: error)
+    }
+
+    // MARK: - Filesystem fixtures
+
+    /// The caller is responsible for removing the directory (see `withTempDirectory`).
+    static func makeTempDirectory() throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("AcaiCLITests-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+        return url
+    }
+
+    static func withTempDirectory<T>(_ body: (URL) async throws -> T) async throws -> T {
+        let dir = try makeTempDirectory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        return try await body(dir)
+    }
+
+    /// Produces a codebase that yields non-trivial class/sequence/call-graph diagrams.
+    @discardableResult
+    static func writeSampleSwiftSource(in directory: URL) throws -> URL {
+        let source = """
+        class Service {
+            let repository: Repository = Repository()
+            func run() {
+                repository.save()
+            }
+        }
+
+        class Repository {
+            func save() {}
+        }
+        """
+        let fileURL = directory.appendingPathComponent("Sample.swift")
+        try source.write(to: fileURL, atomically: true, encoding: .utf8)
+        return fileURL
+    }
+
+    /// Documented declarations beside undocumented ones.
+    @discardableResult
+    static func writeDocumentedSwiftSource(in directory: URL) throws -> URL {
+        let source = """
+        /// Stores and retrieves orders.
+        class Repository {
+            /// Writes the order to disk.
+            func save() {}
+            func load() {}
+        }
+
+        class Undocumented {
+            func run() {}
+        }
+
+        /// A playing card's suit.
+        enum Suit {
+            /// The red one.
+            case hearts
+            case spades
+        }
+        """
+        let fileURL = directory.appendingPathComponent("Documented.swift")
+        try source.write(to: fileURL, atomically: true, encoding: .utf8)
+        return fileURL
+    }
+
+    /// A source with a real parse diagnostic (an unclosed brace), driving `HealthCheck` below
+    /// `HealthCheck.trustThreshold` so a low-trust `health` field/warning is exercised.
+    @discardableResult
+    static func writeLowTrustSwiftSource(in directory: URL) throws -> URL {
+        let source = "struct Broken { func m( {"
+        let fileURL = directory.appendingPathComponent("Broken.swift")
+        try source.write(to: fileURL, atomically: true, encoding: .utf8)
+        return fileURL
+    }
+
+    static func nonexistentPath() -> String {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent("AcaiCLITests-missing-\(UUID().uuidString)")
+            .path
+    }
+}

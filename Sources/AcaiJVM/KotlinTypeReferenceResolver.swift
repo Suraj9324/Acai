@@ -1,0 +1,184 @@
+import AcaiCore
+import AcaiTreeSitter
+
+// MARK: - KotlinTypeReferenceResolver
+
+/// Parses Kotlin type syntax — user, nullable, function and parenthesized types, type arguments,
+/// generic parameters and supertype specifiers. Stateless beyond `context`.
+struct KotlinTypeReferenceResolver {
+    let context: SourceFileContext
+
+    // MARK: - Supertype Classification
+
+    /// A type reference paired with whether it came from a constructor invocation
+    /// (class inheritance) or a bare type / delegation (interface conformance).
+    struct ClassifiedSupertype {
+        let typeRef: TypeReference
+        let isClassInheritance: Bool
+    }
+
+    func classifySupertypes(_ specifiers: [Node]) -> [ClassifiedSupertype] {
+        specifiers.compactMap { specifier in
+            if let constructorInvocation = specifier.firstChild(withType: "constructor_invocation"),
+               let userTypeNode = constructorInvocation.firstChild(withType: "user_type") {
+                return ClassifiedSupertype(typeRef: extractTypeReference(userTypeNode), isClassInheritance: true)
+            } else if let userTypeNode = specifier.firstChild(withType: "user_type") {
+                return ClassifiedSupertype(typeRef: extractTypeReference(userTypeNode), isClassInheritance: false)
+            } else if let explicitDelegation = specifier.firstChild(withType: "explicit_delegation"),
+                      let userTypeNode = explicitDelegation.firstChild(withType: "user_type") {
+                return ClassifiedSupertype(typeRef: extractTypeReference(userTypeNode), isClassInheritance: false)
+            }
+            return nil
+        }
+    }
+
+    // MARK: - Type References
+
+    func extractTypeReferenceFromAny(_ node: Node) -> TypeReference {
+        switch node.nodeType {
+        case "user_type":
+            return extractTypeReference(node)
+        case "nullable_type":
+            return extractNullableType(node)
+        case "function_type":
+            return extractFunctionType(node)
+        case "parenthesized_type":
+            return node.namedChildren().first.map { extractTypeReferenceFromAny($0) }
+                ?? TypeReference(name: node.text(in: context))
+        default:
+            return TypeReference(name: node.text(in: context))
+        }
+    }
+
+    func extractTypeReference(_ node: Node) -> TypeReference {
+        // A qualified reference (`com.example.Animal`, `Outer.Inner`) nests its qualifier in a
+        // `user_type` child; only the trailing `type_identifier` at this level is the simple name.
+        var simpleName = ""
+        var genericArgs: [TypeReference] = []
+        for child in node.namedChildren() {
+            switch child.nodeType {
+            case "type_identifier":
+                simpleName = child.text(in: context)
+            case "type_arguments":
+                genericArgs = extractTypeArguments(child)
+            default:
+                break
+            }
+        }
+        return TypeReference(name: simpleName, genericArguments: genericArgs)
+    }
+
+    func extractNullableType(_ node: Node) -> TypeReference {
+        if let inner = node.namedChildren().first {
+            var ref = extractTypeReferenceFromAny(inner)
+            ref.isOptional = true
+            return ref
+        }
+        var typeName = node.text(in: context)
+        if typeName.hasSuffix("?") { typeName = String(typeName.dropLast()) }
+        return TypeReference(name: typeName, isOptional: true)
+    }
+
+    func extractFunctionType(_ node: Node) -> TypeReference { TypeReference(name: node.text(in: context)) }
+
+    func extractTypeArguments(_ node: Node) -> [TypeReference] {
+        node.namedChildren().compactMap { child in
+            switch child.nodeType {
+            case "type_projection":
+                if let star = child.firstChild(withType: "star_projection") {
+                    return TypeReference(name: star.text(in: context))
+                }
+                return child.namedChildren().first.map { extractTypeReferenceFromAny($0) }
+            case "user_type":
+                return extractTypeReference(child)
+            case "nullable_type":
+                return extractNullableType(child)
+            default:
+                return nil
+            }
+        }
+    }
+
+    /// The first type node among `node`'s named children (a declaration's `: Type` annotation).
+    func extractFirstTypeRef(from node: Node) -> TypeReference? {
+        for child in node.namedChildren() {
+            switch child.nodeType {
+            case "user_type":
+                return extractTypeReference(child)
+            case "nullable_type":
+                return extractNullableType(child)
+            case "function_type":
+                return extractFunctionType(child)
+            default:
+                break
+            }
+        }
+        return nil
+    }
+
+    // MARK: - Generic Parameters
+
+    /// Kotlin writes a `where` clause as a `type_constraints` sibling of `type_parameters`.
+    func typeParameters(of declaration: Node) -> [GenericParameter] {
+        var params: [GenericParameter] = []
+        let parameterList = declaration.firstChild(withType: "type_parameters")
+        for child in parameterList?.allChildren(withType: "type_parameter") ?? [] {
+            let name = child.firstChild(withType: "type_identifier").map { $0.text(in: context) }
+                ?? child.firstChild(withType: "simple_identifier").map { $0.text(in: context) }
+                ?? ""
+            guard !name.isEmpty else { continue }
+            var constraints: [GenericConstraint] = []
+            if let userTypeNode = child.firstChild(withType: "user_type") {
+                constraints.append(GenericConstraint(kind: .conformance, type: extractTypeReference(userTypeNode)))
+            } else if let nullableTypeNode = child.firstChild(withType: "nullable_type") {
+                constraints.append(GenericConstraint(kind: .conformance, type: extractNullableType(nullableTypeNode)))
+            }
+            params.append(GenericParameter(name: name, constraints: constraints, variance: variance(of: child)))
+        }
+
+        guard let constraintsNode = declaration.firstChild(withType: "type_constraints") else { return params }
+        for (name, constraint) in typeConstraints(constraintsNode) {
+            if let index = params.firstIndex(where: { $0.name == name }) {
+                params[index].constraints.append(constraint)
+            } else {
+                params.append(GenericParameter(name: name, constraints: [constraint]))
+            }
+        }
+        return params
+    }
+
+    private func typeConstraints(_ node: Node) -> [(name: String, constraint: GenericConstraint)] {
+        node.allChildren(withType: "type_constraint").compactMap { child in
+            let name = child.firstChild(withType: "simple_identifier").map { $0.text(in: context) }
+                ?? child.firstChild(withType: "type_identifier").map { $0.text(in: context) }
+                ?? ""
+            guard !name.isEmpty else { return nil }
+            let bound: TypeReference
+            if let userTypeNode = child.firstChild(withType: "user_type") {
+                bound = extractTypeReference(userTypeNode)
+            } else if let nullableTypeNode = child.firstChild(withType: "nullable_type") {
+                bound = extractNullableType(nullableTypeNode)
+            } else {
+                return nil
+            }
+            return (name, GenericConstraint(kind: .conformance, type: bound))
+        }
+    }
+
+    /// `nil` also for `in out`, which Kotlin rejects as a conflicting projection.
+    private func variance(of typeParameter: Node) -> Variance? {
+        let keywords = Set(
+            typeParameter.firstChild(withType: "type_parameter_modifiers")?
+                .allChildren(withType: "variance_modifier")
+                .map { $0.text(in: context) } ?? []
+        )
+        switch keywords {
+        case ["out"]:
+            return .covariant
+        case ["in"]:
+            return .contravariant
+        default:
+            return nil
+        }
+    }
+}

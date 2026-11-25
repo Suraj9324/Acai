@@ -1,0 +1,252 @@
+import CoreGraphics
+import Testing
+import AcaiCore
+import AcaiDiagram
+import AcaiRender
+import AcaiQuality
+@testable import AcaiApp
+
+@Suite("Sequence Diagram View Model")
+@MainActor
+struct SequenceDiagramViewModelTests {
+
+    /// `Service.run` calls `Repository.save`, so a trace from `Service.run` yields two participants.
+    private func artifact() -> CodeArtifact {
+        CodeArtifact(
+            metadata: .init(sourceLanguage: .swift, filePaths: ["Service.swift"]),
+            types: [
+                TypeDeclaration(
+                    id: "Service", name: "Service", qualifiedName: "Service", kind: .class,
+                    accessLevel: .public,
+                    members: [
+                        Member(name: "run", kind: .method, accessLevel: .internal, callSites: [
+                            CallSite(receiver: .type("Repository"), methodName: "save")
+                        ])
+                    ]
+                ),
+                TypeDeclaration(
+                    id: "Repository", name: "Repository", qualifiedName: "Repository", kind: .class,
+                    accessLevel: .public,
+                    members: [Member(name: "save", kind: .method, accessLevel: .internal)]
+                )
+            ]
+        )
+    }
+
+    private func config(type: String = "Service", method: String = "run") -> SequenceDiagramConfiguration {
+        SequenceDiagramConfiguration(entryTypeName: type, entryMethodName: method)
+    }
+
+    @Test func generatesParticipantsForTraceableEntryPoint() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        #expect(vm.diagram.participants.map(\.name) == ["Service", "Repository"])
+        #expect(!vm.isEmpty)
+    }
+
+    @Test func untraceableEntryPointIsEmpty() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config(type: "Nope", method: "x"))
+        #expect(vm.isEmpty)
+    }
+
+    @Test func filterDropsNonMatchingNonEntryParticipants() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.applyFilter(Selector(typeGlob: "Service"))
+        #expect(vm.diagram.participants.map(\.name) == ["Service"])
+        #expect(vm.diagram.messages.isEmpty)
+    }
+
+    @Test func filterNeverDropsTheEntryParticipant() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.applyFilter(Selector(typeGlob: "NoSuchType"))
+        #expect(vm.diagram.participants.map(\.name) == ["Service"])
+    }
+
+    @Test func clearingFilterRestoresEveryParticipant() {
+        var configured = config()
+        configured.filter = Selector(typeGlob: "Service")
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: configured)
+        #expect(vm.diagram.participants.map(\.name) == ["Service"])
+        vm.applyFilter(nil)
+        #expect(vm.diagram.participants.map(\.name) == ["Service", "Repository"])
+    }
+
+    @Test func restoredPositionsSeedStateAsIs() {
+        // Restored positions seed the overrides unchanged; `moveNode` is the single point that pins
+        // y to 0, so saved data (always written via `moveNode`) round-trips without normalization.
+        let vm = SequenceDiagramViewModel(
+            artifact: artifact(), configuration: config(),
+            restoredPositions: ["Service": CGPoint(x: 99, y: 0)]
+        )
+        #expect(vm.positionOverrides["Service"] == CGPoint(x: 99, y: 0))
+    }
+
+    @Test func moveNodeRecordsDragAndLayoutPinsVertical() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        let yBefore = vm.nodePosition("Service")?.y
+        vm.moveNode("Service", to: CGPoint(x: 42, y: 999))
+        #expect(vm.positionOverrides["Service"]?.x == 42)
+        // Lifelines move horizontally only: the override's y is pinned to 0 so nothing meaningless
+        // is persisted (a drag's vertical component must not leak into the saved positions).
+        #expect(vm.positionOverrides["Service"]?.y == 0)
+        // Only the horizontal component reaches the layout, so the lifeline stays on the header row.
+        #expect(vm.nodePosition("Service")?.y == yBefore)
+    }
+
+    @Test func resizeNodeIsNoOp() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.resizeNode("Service", width: 500, height: 500)
+        #expect(vm.positionOverrides.isEmpty)
+    }
+
+    @Test func selectionTogglesExtendsAndClears() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.selectNode("Service", extending: false)
+        #expect(vm.selectedNodeIDs == ["Service"])
+        vm.selectNode("Repository", extending: true)
+        #expect(vm.selectedNodeIDs == ["Service", "Repository"])
+        vm.selectNode("Repository", extending: true)
+        #expect(vm.selectedNodeIDs == ["Service"])
+        vm.clearSelection()
+        #expect(vm.selectedNodeIDs.isEmpty)
+    }
+
+    @Test func selectAllSelectsEveryParticipant() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.selectAll()
+        #expect(vm.selectedNodeIDs == ["Service", "Repository"])
+    }
+
+    @Test func selectNodesInRectSelectsContainedParticipants() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.selectNodes(in: CGRect(x: -10_000, y: -10_000, width: 20_000, height: 20_000))
+        #expect(vm.selectedNodeIDs == ["Service", "Repository"])
+    }
+
+    @Test func applyConfigurationRegeneratesAndClearsTransientState() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.moveNode("Service", to: CGPoint(x: 10, y: 0))
+        vm.selectNode("Service", extending: false)
+
+        vm.applyConfiguration(config(type: "Nope", method: "x"))
+        #expect(vm.isEmpty)
+        #expect(vm.positionOverrides.isEmpty)
+        #expect(vm.selectedNodeIDs.isEmpty)
+    }
+
+    @Test func historySnapshotMirrorsOverrides() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.positionOverrides = ["Service": CGPoint(x: 7, y: 0)]
+        #expect(vm.historySnapshot == ["Service": CGPoint(x: 7, y: 0)])
+        vm.historySnapshot = ["Repository": CGPoint(x: 3, y: 0)]
+        #expect(vm.positionOverrides == ["Repository": CGPoint(x: 3, y: 0)])
+    }
+
+    // MARK: - Delta mode
+
+    /// `Repository` gains a `log` method that `Repository.save` calls, so only the newer revision's
+    /// trace reaches the `Logger` participant.
+    private func artifact(loggingFromSave: Bool) -> CodeArtifact {
+        let save = Member(
+            name: "save", kind: .method, accessLevel: .internal,
+            callSites: loggingFromSave ? [CallSite(receiver: .type("Logger"), methodName: "log")] : []
+        )
+        var types = [
+            TypeDeclaration(
+                id: "Service", name: "Service", qualifiedName: "Service", kind: .class,
+                accessLevel: .public,
+                members: [Member(name: "run", kind: .method, accessLevel: .internal, callSites: [
+                    CallSite(receiver: .type("Repository"), methodName: "save")
+                ])]
+            ),
+            TypeDeclaration(
+                id: "Repository", name: "Repository", qualifiedName: "Repository", kind: .class,
+                accessLevel: .public, members: [save]
+            )
+        ]
+        if loggingFromSave {
+            types.append(TypeDeclaration(
+                id: "Logger", name: "Logger", qualifiedName: "Logger", kind: .class, accessLevel: .public,
+                members: [Member(name: "log", kind: .method, accessLevel: .internal)]
+            ))
+        }
+        return CodeArtifact(
+            metadata: .init(sourceLanguage: .swift, filePaths: ["Service.swift"]), types: types)
+    }
+
+    @Test func comparisonArtifactMarksAddedElements() throws {
+        let vm = SequenceDiagramViewModel(
+            artifact: artifact(loggingFromSave: true), configuration: config(),
+            comparisonArtifact: artifact(loggingFromSave: false))
+
+        #expect(vm.isDeltaMode)
+        // Rendered as the union of both revisions, so every participant is present to be tinted.
+        #expect(vm.diagram.participants.map(\.name) == ["Service", "Repository", "Logger"])
+        #expect(vm.participantDeltaStatus("Logger") == .added)
+        #expect(vm.participantDeltaStatus("Service") == nil)
+
+        let addedMessage = try #require(vm.orderedMessages.first { $0.to == "Logger" })
+        let unchangedMessage = try #require(vm.orderedMessages.first { $0.to == "Repository" })
+        #expect(vm.messageDeltaStatus(addedMessage) == .added)
+        #expect(vm.messageDeltaStatus(unchangedMessage) == nil)
+    }
+
+    @Test func noComparisonArtifactMeansNoDeltaStatus() throws {
+        let vm = SequenceDiagramViewModel(
+            artifact: artifact(loggingFromSave: true), configuration: config())
+        #expect(!vm.isDeltaMode)
+        #expect(vm.participantDeltaStatus("Logger") == nil)
+        let message = try #require(vm.orderedMessages.first)
+        #expect(vm.messageDeltaStatus(message) == nil)
+    }
+
+    @Test func aComparisonChangeDropsOffsetsSelectionAndHistoryInPlace() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+        vm.positionOverrides["Service"] = CGPoint(x: 40, y: 0)
+        vm.selectedMessageID = 0
+        vm.recordUndo()
+        #expect(vm.canUndo)
+
+        vm.updateComparison(artifact: artifact(), comparison: artifact(loggingFromSave: false))
+
+        #expect(vm.isDeltaMode)
+        #expect(vm.positionOverrides.isEmpty)
+        #expect(vm.selectedMessageID == nil)
+        #expect(!vm.canUndo)
+
+        vm.updateComparison(artifact: artifact(), comparison: nil)
+        #expect(!vm.isDeltaMode)
+    }
+}
+
+// MARK: - Rotor plan
+
+extension SequenceDiagramViewModelTests {
+    @Test("The rotor plan names every drawn participant and message, and a comparison's additions are changed")
+    func rotorPlanMatchesTheCanvas() throws {
+        let vm = SequenceDiagramViewModel(
+            artifact: artifact(loggingFromSave: true), configuration: config(),
+            comparisonArtifact: artifact(loggingFromSave: false))
+        let layout = vm.layout
+
+        let plan = vm.rotorPlan
+
+        #expect(Set(plan.elements.map(\.id)) == Set(layout.participants.map(\.id)))
+        #expect(Set(plan.connections.map(\.id)) == Set(layout.messages.map(\.accessibilityID)))
+        let addedIndex = try #require(vm.orderedMessages.firstIndex { $0.to == "Logger" })
+        let addedMessage = try #require(layout.messages.first { $0.id == addedIndex })
+        let changed = Set(plan.changed.map(\.id))
+        #expect(changed.contains("Logger"))
+        #expect(changed.contains(addedMessage.accessibilityID))
+        #expect(!changed.contains("Service"))
+    }
+
+    @Test("Selection and a drag tick reuse the rotor plan; a committed drag or a new configuration rebuilds it")
+    func rotorPlanIsCachedUntilTheLayoutChanges() {
+        let vm = SequenceDiagramViewModel(artifact: artifact(), configuration: config())
+
+        RotorPlanCachingCheck(model: vm) { $0.rotorPlan }.verify(moving: "Service", to: CGPoint(x: 5000, y: 0))
+
+        vm.applyConfiguration(config(type: "Repository", method: "save"))
+        #expect(vm.rotorPlan.elements.map(\.id) == ["Repository"])
+    }
+}
